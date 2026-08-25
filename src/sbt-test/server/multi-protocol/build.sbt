@@ -37,7 +37,6 @@ TaskKey[Unit]("mcpCheckProtocols", "List tools over every MCP protocol version a
       .mountedAt("/")
   val upstreamLayer = ZLayer.succeed(Server.Config.default.binding("127.0.0.1", 5197)) >>> Server.live
   val rt            = Runtime.default
-  Unsafe.unsafe { implicit u => rt.unsafe.fork(Server.serve(upstream.statelessRoutes).provide(upstreamLayer)) }
 
   val builtIns = Set("sbt-task", "list-tasks", "glob-search", "inspect", "symbol-location")
   val proxied  = "docs-echo"
@@ -65,8 +64,18 @@ TaskKey[Unit]("mcpCheckProtocols", "List tools over every MCP protocol version a
     }.retry(Schedule.recurs(50) && Schedule.spaced(200.millis))
 
   val prog =
-    // Give the daemon servers a moment to bind, then check every protocol.
-    ZIO.sleep(500.millis) *> ZIO.foreach(versions) { case (pref, wire) => checkOne(pref, wire).map(r => (wire, r)) }
+    ZIO.scoped {
+      for
+        // Scope the local upstream so zio-http/Netty resources are interrupted and
+        // finalized before the scripted task returns (no leaked event-loop threads).
+        _ <- Server.serve(upstream.statelessRoutes).provide(upstreamLayer).forkScoped
+        // Give both daemon servers a moment to bind, then check every protocol.
+        _ <- ZIO.sleep(500.millis)
+        results <- ZIO.foreach(versions) { case (pref, wire) =>
+                     checkOne(pref, wire).map(r => (wire, r))
+                   }
+      yield results
+    }
 
   val results =
     Unsafe.unsafe { implicit u =>

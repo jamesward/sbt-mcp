@@ -15,4 +15,6 @@ jobs:
         java-version: 25
         cache: 'sbt'
 
-    - run: ./sbt 'compile; scripted'
+    - name: Compile and run scripted tests
+      timeout-minutes: 15
+      run: ./sbt 'compile; scripted'

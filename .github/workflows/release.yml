@@ -16,9 +16,13 @@ jobs:
           java-version: 25
           cache: 'sbt'
 
-      - run: |
-          ./sbt 'compile; scripted'
-          ./sbt ci-release
+      - name: Compile and run scripted tests
+        timeout-minutes: 15
+        run: ./sbt 'compile; scripted'
+
+      - name: Publish release
+        timeout-minutes: 20
+        run: ./sbt ci-release
         env:
           SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
           SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}

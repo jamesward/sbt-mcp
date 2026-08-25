@@ -34,20 +34,24 @@ TaskKey[Unit]("mcpCheckProxy", "Validate MCP tool proxying") := Def.uncached {
       .mountedAt("/")
   val upstreamLayer = ZLayer.succeed(Server.Config.default.binding("127.0.0.1", 5198)) >>> Server.live
   val rt            = Runtime.default
-  Unsafe.unsafe { implicit u => rt.unsafe.fork(Server.serve(upstream.statelessRoutes).provide(upstreamLayer)) }
 
-  // Query OUR server, retrying until the proxied tool has been merged in.
+  // Query OUR server, retrying until the proxied tool has been merged in. The local
+  // upstream runs in this scope, so its zio-http/Netty resources are interrupted and
+  // finalized before the scripted task returns (no leaked event-loop threads in CI).
   val prog =
     ZIO.scoped {
-      McpClient.connect("http://127.0.0.1:5099/").flatMap { c =>
-        c.listTools.flatMap { tools =>
-          val names = tools.map(_.name.toString).toSet
-          if (names.contains("docs-echo") && names.contains("glob-search"))
-            c.callTool("docs-echo", Json.Obj()).map(r => (names, textOf(r)))
-          else ZIO.fail(new RuntimeException(s"waiting for proxied tools; have: $names"))
-        }
-      }
-    }.retry(Schedule.recurs(50) && Schedule.spaced(200.millis))
+      for
+        _ <- Server.serve(upstream.statelessRoutes).provide(upstreamLayer).forkScoped
+        result <- McpClient.connect("http://127.0.0.1:5099/").flatMap { c =>
+                    c.listTools.flatMap { tools =>
+                      val names = tools.map(_.name.toString).toSet
+                      if (names.contains("docs-echo") && names.contains("glob-search"))
+                        c.callTool("docs-echo", Json.Obj()).map(r => (names, textOf(r)))
+                      else ZIO.fail(new RuntimeException(s"waiting for proxied tools; have: $names"))
+                    }
+                  }.retry(Schedule.recurs(50) && Schedule.spaced(200.millis))
+      yield result
+    }
 
   val (names, echo) = Unsafe.unsafe { implicit u => rt.unsafe.run(prog.provide(Client.default)).getOrThrow() }
 
