@@ -4,7 +4,7 @@ import com.jamesward.ziohttp.mcp.*
 import com.jamesward.ziohttp.mcp.McpInput.given
 import com.jamesward.ziohttp.mcp.McpOutput.given
 import com.jamesward.ziohttp.mcp.McpError.given
-import com.jamesward.ziohttp.mcp.client.McpClient
+import com.jamesward.ziohttp.mcp.client.{McpClient, McpClientConfig}
 import zio.*
 import zio.http.*
 import zio.json.ast.Json
@@ -229,10 +229,12 @@ object McpServerRuntime {
    * fresh zio-http [[Client]]) and degrade gracefully: an unreachable upstream yields
    * an empty tool list / an `isError` result rather than failing our server.
    */
+  private val docsProxyClientInfo = Implementation("sbt-mcp-docs-proxy", "1.0.0")
+
   private final class ProxyToolSource(url: String) extends McpToolSource[Any] {
     def listTools(ctx: McpToolContext): ZIO[Any, Nothing, Chunk[ToolDefinition]] =
       ZIO
-        .scoped(McpClient.connect(url).flatMap(_.listTools))
+        .scoped(McpClient.connect(McpClientConfig(url, clientInfo = docsProxyClientInfo)).flatMap(_.listTools))
         .provide(Client.default)
         .catchAll(e =>
           ZIO.logWarning(s"sbt-mcp: docs proxy ($url) listTools failed: $e").as(Chunk.empty)
@@ -240,7 +242,7 @@ object McpServerRuntime {
 
     def callTool(name: ToolName, args: Option[Json.Obj], ctx: McpToolContext): ZIO[Any, Nothing, CallToolResult] =
       ZIO
-        .scoped(McpClient.connect(url).flatMap(_.callTool(name.value, args.getOrElse(Json.Obj()))))
+        .scoped(McpClient.connect(McpClientConfig(url, clientInfo = docsProxyClientInfo)).flatMap(_.callTool(name.value, args.getOrElse(Json.Obj()))))
         .provide(Client.default)
         .catchAll(e =>
           ZIO.logWarning(s"sbt-mcp: docs proxy ($url) callTool '${name.value}' failed: $e").as(
