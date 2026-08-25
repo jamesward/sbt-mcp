@@ -1,0 +1,6 @@
+# Multi-module build: the single, process-global MCP server must report its status
+# once — not once per aggregated subproject. `mcpStatus` on the root should print a
+# single "running at ..." line. checkStatusNoAggregate asserts the mechanism
+# (mcpStatus/aggregate = false) that guarantees this.
+> mcpStatus
+> checkStatusNoAggregate

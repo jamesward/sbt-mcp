@@ -42,6 +42,17 @@ object McpServerRuntime {
       listTasks: () => List[(String, String)],
       docsUrl: Option[String],
   ): Handle = {
+    // sbt 2.0.x puts slf4j-api 1.7.x in a parent classloader without a binding.
+    // Netty's default logger discovery probes SLF4J first, which prints the noisy
+    // StaticLoggerBinder warning before falling back. A binding added by this plugin
+    // (or a scripted meta-build) lives in a child classloader and is therefore
+    // invisible to that parent API. Select JUL explicitly before zio-http starts so
+    // Netty never performs the broken SLF4J probe. ZIO's own server logging remains
+    // controlled by the quiet runtime below.
+    io.netty.util.internal.logging.InternalLoggerFactory.setDefaultFactory(
+      io.netty.util.internal.logging.JdkLoggerFactory.INSTANCE
+    )
+
     val base: McpServer[Any] =
       McpServer("sbt-mcp", "0.1.0")
         .instructions(
@@ -56,13 +67,13 @@ object McpServerRuntime {
         .tool(locationTool(refresh))
     // Proxy an upstream MCP server (javadocs.dev by default): its tools are merged
     // into tools/list, and any tools/call not matching our built-ins is forwarded.
-    val withProxy = docsUrl.filter(_.trim.nonEmpty) match {
+    val withProxy: McpServer[Client] = docsUrl.filter(_.trim.nonEmpty) match {
       case Some(u) => base.toolSource(new ProxyToolSource(u.trim))
       case None    => base
     }
-    val server: McpServer[Any] = withProxy.mountedAt("/")
+    val server: McpServer[Client] = withProxy.mountedAt("/")
 
-    val routes: Routes[Any, Response] = server.statelessRoutes
+    val routes: Routes[Client, Response] = server.statelessRoutes
 
     // Bind to loopback explicitly; do NOT expose on 0.0.0.0.
     val serverLayer =
@@ -82,7 +93,7 @@ object McpServerRuntime {
     val runtime = Unsafe.unsafe { implicit u => Runtime.unsafe.fromLayer(quietLogging) }
     val fiber =
       Unsafe.unsafe { implicit u =>
-        runtime.unsafe.fork(Server.serve(routes).provide(serverLayer))
+        runtime.unsafe.fork(Server.serve(routes).provide(serverLayer, Client.default))
       }
 
     Handle(
@@ -225,25 +236,24 @@ object McpServerRuntime {
   /**
    * A [[McpToolSource]] that proxies an upstream MCP server (e.g. javadocs.dev). Its
    * tools are merged into `tools/list`, and a `tools/call` for any name not matched by
-   * our built-in tools is forwarded to the upstream. We connect per request (via a
-   * fresh zio-http [[Client]]) and degrade gracefully: an unreachable upstream yields
-   * an empty tool list / an `isError` result rather than failing our server.
+   * our built-in tools is forwarded to the upstream. Each request opens a scoped MCP
+   * session over the shared zio-http [[Client]] supplied to the server routes. An
+   * unreachable upstream degrades gracefully to an empty tool list / an `isError`
+   * result rather than failing our server.
    */
   private val docsProxyClientInfo = Implementation("sbt-mcp-docs-proxy", "1.0.0")
 
-  private final class ProxyToolSource(url: String) extends McpToolSource[Any] {
-    def listTools(ctx: McpToolContext): ZIO[Any, Nothing, Chunk[ToolDefinition]] =
+  private final class ProxyToolSource(url: String) extends McpToolSource[Client] {
+    def listTools(ctx: McpToolContext): ZIO[Client, Nothing, Chunk[ToolDefinition]] =
       ZIO
         .scoped(McpClient.connect(McpClientConfig(url, clientInfo = docsProxyClientInfo)).flatMap(_.listTools))
-        .provide(Client.default)
         .catchAll(e =>
           ZIO.logWarning(s"sbt-mcp: docs proxy ($url) listTools failed: $e").as(Chunk.empty)
         )
 
-    def callTool(name: ToolName, args: Option[Json.Obj], ctx: McpToolContext): ZIO[Any, Nothing, CallToolResult] =
+    def callTool(name: ToolName, args: Option[Json.Obj], ctx: McpToolContext): ZIO[Client, Nothing, CallToolResult] =
       ZIO
         .scoped(McpClient.connect(McpClientConfig(url, clientInfo = docsProxyClientInfo)).flatMap(_.callTool(name.value, args.getOrElse(Json.Obj()))))
-        .provide(Client.default)
         .catchAll(e =>
           ZIO.logWarning(s"sbt-mcp: docs proxy ($url) callTool '${name.value}' failed: $e").as(
             CallToolResult(

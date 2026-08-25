@@ -73,6 +73,8 @@ Point an MCP client (Claude Code, Cursor, etc.) at `http://127.0.0.1:5010/`.
 `mcpEnabled` / `mcpPort` / `mcpHost` are **global** settings and exactly one MCP
 server runs per build (shared by all subprojects and clients). The symbol index
 tracks a single active project — the current project when a symbol tool is invoked.
+Because the server is a single build-wide instance, `mcpStatus` does not aggregate
+across subprojects — it prints one status line even on an aggregating root.
 
 ## Configuration
 

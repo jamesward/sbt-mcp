@@ -182,6 +182,11 @@ object SbtMcpPlugin extends AutoPlugin {
         case None    => log.info("sbt-mcp: not running (set `Global / mcpEnabled := true` to enable)")
       }
     },
+    // The MCP server is a single process-global instance shared by the whole build,
+    // so its status is a build-wide fact, not a per-project one. Without this, running
+    // `mcpStatus` on an aggregating root would aggregate to every subproject and print
+    // the same line once per module. Disabling aggregation makes it print exactly once.
+    mcpStatus / aggregate := false,
   )
 
   /**

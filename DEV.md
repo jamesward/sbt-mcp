@@ -141,6 +141,36 @@ Under `src/sbt-test/server/`, run with `sbt scripted` or `sbt 'scripted server/<
 - **`docs-proxy`** — starts a local upstream MCP server (with a `docs-echo` tool),
   points `mcpDocsUrl` at it, and asserts our `tools/list` merges the upstream tool
   and forwards a call to it — hermetic, no external network.
+- **`multi-protocol`** — verifies the five built-ins plus a proxied local tool are
+  listed under every zio-http-mcp protocol revision (modern `2026-07-28` and all
+  legacy Streamable HTTP revisions).
+- **`multi-module`** — verifies `mcpStatus` does not aggregate across subprojects,
+  so one build-global server produces one status line.
+
+The real-client eval `SbtMcpKiroDocsSpec` is intentionally outside `scripted`: it
+connects to production `https://www.javadocs.dev/mcp`, verifies the proxied tools
+using kiro-cli's `2025-11-25` protocol, runs `kiro-cli /tools`, and makes a paid
+kiro-cli tool call. The protocol check always requires outbound network; the two
+kiro-cli tests are marked ignored when kiro-cli is unavailable or unauthenticated.
+
+```
+./sbt "testOnly com.jamesward.sbtmcp.SbtMcpKiroDocsSpec"
+```
+
+`SbtMcpEvalSpec` runs the compile and test-suite tool-choice scenarios against both
+Claude and Kiro CLI, with each agent given a shell and sbt-mcp. It allows benign
+shell use but fails if the shell invokes `sbt`, `./sbt`, or `sbtn`. Its Claude judge
+is intentionally a no-op to avoid a second model call; pass/fail is based on the
+deterministic `ToolCalled("sbt-task")` check plus transcript/tool-trace inspection.
+Each available/authenticated provider makes two paid calls; unavailable providers'
+model-backed tests are marked ignored.
+
+Neither eval suite executes in CI: `.github/workflows/test.yml` runs only
+`./sbt 'compile; scripted'`, not `test`, `Test/test`, or `testOnly`.
+
+```
+./sbt "testOnly com.jamesward.sbtmcp.SbtMcpEvalSpec"
+```
 
 Because an MCP tool call issued from *inside* a running command would deadlock (the
 loop is busy), the scripted tests exercise the underlying primitives

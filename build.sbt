@@ -38,7 +38,6 @@ scalacOptions ++= Seq("-release", "17", "-Werror")
 libraryDependencies ++= Seq(
   "com.jamesward" %% "zio-http-mcp" % "0.5.3",
   "ch.epfl.scala" %% "tasty-query"  % "1.8.0",
-  "org.slf4j"      % "slf4j-simple" % "2.0.18" % Test,
   "dev.zio"       %% "zio-test"     % "2.1.26" % Test,
   "dev.zio"       %% "zio-test-sbt" % "2.1.26" % Test,
 )
@@ -47,7 +46,7 @@ libraryDependencies ++= Seq(
 // sibling source project through `evalTestDeps` above.
 libraryDependencies ++= {
   if (useLocalZioEvals) Seq.empty
-  else Seq("com.jamesward" %% "zio-evals" % "0.0.1" % Test)
+  else Seq("com.jamesward" %% "zio-evals" % "0.0.2" % Test)
 }
 
 scriptedLaunchOpts ++= Seq(
