@@ -17,4 +17,4 @@ jobs:
 
     - name: Compile and run scripted tests
       timeout-minutes: 15
-      run: ./sbt 'compile; scripted'
+      run: ./sbt --server --no-server --batch 'compile; scripted'

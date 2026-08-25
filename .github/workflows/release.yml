@@ -18,11 +18,11 @@ jobs:
 
       - name: Compile and run scripted tests
         timeout-minutes: 15
-        run: ./sbt 'compile; scripted'
+        run: ./sbt --server --no-server --batch 'compile; scripted'
 
       - name: Publish release
         timeout-minutes: 20
-        run: ./sbt ci-release
+        run: ./sbt --server --no-server --batch ci-release
         env:
           SONATYPE_USERNAME: ${{ secrets.SONATYPE_USERNAME }}
           SONATYPE_PASSWORD: ${{ secrets.SONATYPE_PASSWORD }}
