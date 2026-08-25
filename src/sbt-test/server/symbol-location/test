@@ -1,0 +1,2 @@
+# Validate we can get the source location (path:line) of a symbol.
+> checkSymbolLocation

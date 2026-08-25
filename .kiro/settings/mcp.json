@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "sbt-mcp": {
+      "url": "http://127.0.0.1:5010/",
+      "timeout": 120000,
+      "disabled": false
+    }
+  }
+}

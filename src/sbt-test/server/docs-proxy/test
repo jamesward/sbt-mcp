@@ -1,0 +1,3 @@
+# Validate that our MCP server proxies an upstream MCP server: its tools are merged
+# into tools/list and calls for its tools are forwarded.
+> mcpCheckProxy

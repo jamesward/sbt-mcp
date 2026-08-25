@@ -1,0 +1,8 @@
+# Verify the MCP server advertises the tools and that `inspect` / `glob-search`
+# read this project's symbols (the index refreshes automatically; mcpCheckTools
+# also seeds it since the loop is busy during the task).
+> compile
+> mcpStatus
+> mcpCheckTools
+# Verify the in-process command primitive that sbt-task uses.
+> mcpInJvmCheck

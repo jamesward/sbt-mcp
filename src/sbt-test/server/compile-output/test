@@ -1,0 +1,3 @@
+# Run compile on three variants (success / warning / failure) via the same
+# in-process path sbt-task uses, and assert the compiler output is captured for all.
+> mcpCompileVariants

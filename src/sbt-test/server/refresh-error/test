@@ -1,0 +1,2 @@
+# A non-compiling project: refresh must fail (so tools surface a stale-index note).
+> checkRefreshError
