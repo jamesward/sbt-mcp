@@ -18,7 +18,7 @@ import tastyquery.jdk.ClasspathLoaders
  * The plugin's automatic refresh (`SbtMcpPlugin.refreshFromState`, run on the sbt
  * command loop where `fullClasspathAsJars` is available) pushes entries + a content
  * fingerprint here before each symbol query; the MCP tool handlers (which run on ZIO
- * threads) pull a lazily-built, cached tasty-query [[Context]] out. This decouples
+ * threads) pull a lazily-built, cached tasty-query `Context` out. This decouples
  * symbol queries from sbt's single-threaded task engine.
  *
  * Multi-module note: entries are keyed by project id. `activeProject` selects

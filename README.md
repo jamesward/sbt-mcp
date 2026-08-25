@@ -1,5 +1,7 @@
 # sbt-mcp
 
+[![javadocs.dev](https://www.javadocs.dev/com.jamesward/sbt-mcp_sbt2_3/badge.svg)](https://www.javadocs.dev/com.jamesward/sbt-mcp_sbt2_3/latest)
+
 An **opt-in, off-by-default** [Model Context Protocol](https://modelcontextprotocol.io/)
 server embedded in an sbt 2.x build. When enabled, it starts an MCP server inside the sbt
 JVM and exposes tools an AI agent can call:
