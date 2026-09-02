@@ -282,7 +282,11 @@ object SbtMcpEvalSpec extends ZIOSpecDefault:
                          )(h => ZIO.attempt(h.close()).ignoreLogged)
                     // Give the daemon server a moment to bind the port.
                     _ <- ZIO.sleep(1.second)
-                    agent = ClaudeCliAgentLoop(modelOverride = Some("claude-sonnet-4-6"), allowShell = true)
+                    agent = ClaudeCliAgentLoop(
+                              modelOverride = Some("claude-sonnet-4-6"),
+                              runTimeout    = 180.seconds,
+                              allowShell    = true,
+                            )
                     spec0 = EvalSpec(
                               task     = task,
                               criteria = criteria,

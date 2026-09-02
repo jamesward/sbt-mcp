@@ -1,0 +1,4 @@
+# Print the agent onboarding instructions, then assert their content (and that the
+# derived server name is not double-prefixed).
+> mcpInstall
+> checkInstall

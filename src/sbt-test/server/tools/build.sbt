@@ -4,6 +4,8 @@ lazy val root = (project in file("."))
   .settings(
     name := "server-tools-test",
     Global / mcpEnabled := true,
+    // This fixture intentionally exercises the server even when scripted runs in CI.
+    Global / mcpDisableInCI := false,
     Global / mcpPort    := 5099,
     Global / mcpHost    := "127.0.0.1",
     // Keep this test hermetic — don't proxy javadocs.dev over the network.

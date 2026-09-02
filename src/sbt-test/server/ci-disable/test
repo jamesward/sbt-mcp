@@ -1,0 +1,2 @@
+# mcpDisableInCI defaults to true. Under CI, prove the enabled server did not bind.
+> checkCiDisable

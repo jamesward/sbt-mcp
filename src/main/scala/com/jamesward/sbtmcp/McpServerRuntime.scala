@@ -7,14 +7,24 @@ import com.jamesward.ziohttp.mcp.McpError.given
 import com.jamesward.ziohttp.mcp.client.{McpClient, McpClientConfig}
 import zio.*
 import zio.http.*
+import zio.http.netty.NettyConfig
 import zio.json.ast.Json
 import zio.schema.{ DeriveSchema, Schema }
+
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
+import scala.concurrent.{ Await, ExecutionContext, TimeoutException }
+import scala.concurrent.duration.FiniteDuration
+import scala.util.control.NonFatal
 
 /**
  * Builds the MCP server (three tools) and serves it over zio-http on a daemon
  * fiber bound to loopback. One instance per sbt server JVM — see [[SbtMcpPlugin]].
  */
 object McpServerRuntime {
+
+  private val ShutdownWait = FiniteDuration(2, TimeUnit.SECONDS)
+  private val StartupWait  = FiniteDuration(5, TimeUnit.SECONDS)
 
   /** Opaque handle used by the plugin to stop the server on `onUnload`. */
   final case class Handle(host: String, port: Int, private val shutdown: () => Unit) {
@@ -75,9 +85,19 @@ object McpServerRuntime {
 
     val routes: Routes[Client, Response] = server.statelessRoutes
 
-    // Bind to loopback explicitly; do NOT expose on 0.0.0.0.
+    // Embedded sbt servers are frequently torn down and rebound during `reload`.
+    // Use zio-http's fast Netty shutdown profile so event-loop finalizers do not
+    // impose the library defaults (2-second quiet period / 15-second timeout).
     val serverLayer =
-      ZLayer.succeed(Server.Config.default.binding(host, port)) >>> Server.live
+      ZLayer.make[Server](
+        ZLayer.succeed(
+          Server.Config.default
+            .binding(host, port)
+            .gracefulShutdownTimeout(1.second)
+        ),
+        ZLayer.succeed(NettyConfig.defaultWithFastShutdown),
+        Server.customized,
+      )
 
     // Silence the embedded server's ZIO INFO chatter ("Starting the server...",
     // "Server started", per-request "MCP tools/call" …) that would otherwise print
@@ -91,16 +111,52 @@ object McpServerRuntime {
       )
 
     val runtime = Unsafe.unsafe { implicit u => Runtime.unsafe.fromLayer(quietLogging) }
-    val fiber =
-      Unsafe.unsafe { implicit u =>
-        runtime.unsafe.fork(Server.serve(routes).provide(serverLayer, Client.default))
-      }
+    val started = scala.concurrent.Promise[Unit]()
+    val serving =
+      (Server
+        .install(routes)
+        .tap(_ => ZIO.succeed(started.trySuccess(())).unit) *> ZIO.never)
+        .provide(serverLayer, Client.default)
+        .tapErrorCause(cause => ZIO.succeed(started.tryFailure(cause.squash)).unit)
+    val fiber = Unsafe.unsafe { implicit u => runtime.unsafe.fork(serving) }
+    val closed        = AtomicBoolean(false)
+    val runtimeClosed = AtomicBoolean(false)
 
-    Handle(
-      host,
-      port,
-      () => Unsafe.unsafe { implicit u => runtime.unsafe.run(fiber.interrupt).getOrThrow(); () },
-    )
+    def shutdownRuntime(): Unit =
+      if runtimeClosed.compareAndSet(false, true) then
+        Unsafe.unsafe { implicit u => runtime.unsafe.shutdown() }
+
+    def shutdown(): Unit =
+      if closed.compareAndSet(false, true) then
+        // `Fiber.interrupt` waits for every uninterruptible finalizer. Netty or
+        // another third-party finalizer must never be allowed to freeze sbt's
+        // synchronous onUnload hook, so start interruption asynchronously and
+        // put a hard JVM-side bound around the wait. Interruption continues in
+        // the background if that bound is exceeded.
+        val interrupted = Unsafe.unsafe { implicit u => runtime.unsafe.runToFuture(fiber.interrupt) }
+        interrupted.onComplete(_ => shutdownRuntime())(using ExecutionContext.parasitic)
+        try Await.ready(interrupted, McpServerRuntime.ShutdownWait)
+        catch
+          case _: TimeoutException => ()
+          case _: InterruptedException =>
+            Thread.currentThread().interrupt()
+        ()
+
+    val handle = Handle(host, port, () => shutdown())
+    try
+      // Do not publish a handle or log successful startup until zio-http has
+      // installed the routes and bound the listener. Bind failures now surface
+      // synchronously to the plugin's existing startup error handling.
+      Await.result(started.future, McpServerRuntime.StartupWait)
+      handle
+    catch
+      case error: InterruptedException =>
+        Thread.currentThread().interrupt()
+        shutdown()
+        throw error
+      case NonFatal(error) =>
+        shutdown()
+        throw error
   }
 
   // ---- Tools ----

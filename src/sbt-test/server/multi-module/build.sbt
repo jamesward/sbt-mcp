@@ -5,6 +5,8 @@
 ThisBuild / scalaVersion := "3.8.4"
 
 Global / mcpEnabled := true
+// This fixture intentionally exercises the server even when scripted runs in CI.
+Global / mcpDisableInCI := false
 Global / mcpPort    := 5098
 Global / mcpHost    := "127.0.0.1"
 // Keep this test hermetic — don't proxy javadocs.dev over the network.

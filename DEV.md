@@ -21,7 +21,9 @@ zio-http 3.11.3 / zio-schema 1.8.6), tasty-query **1.8.0**, Scala **3.8.4**.
   server for the whole build:
   - lifecycle hooks live on `Global / onLoad` / `Global / onUnload` (fire once per
     build load/unload, not once per aggregated project);
-  - `mcpEnabled` / `mcpPort` / `mcpHost` are **global** settings;
+  - `mcpEnabled` / `mcpDisableInCI` / `mcpPort` / `mcpHost` are **global** settings;
+  - startup is skipped when `mcpDisableInCI` is true (the default) and the `CI`
+    environment variable has a truthy value;
   - the server handle is a process-global `AtomicReference` guarded by an atomic
     compare-and-set, so even a repeated `onLoad` (e.g. `reload`) can't bind the
     port twice.
@@ -146,6 +148,12 @@ Under `src/sbt-test/server/`, run with `sbt scripted` or `sbt 'scripted server/<
   legacy Streamable HTTP revisions).
 - **`multi-module`** — verifies `mcpStatus` does not aggregate across subprojects,
   so one build-global server produces one status line.
+- **`ci-disable`** — verifies `mcpDisableInCI` defaults to true and, when the scripted
+  suite runs under CI, proves an enabled server did not bind its configured port.
+
+Server-starting scripted fixtures set `mcpDisableInCI := false` explicitly so they
+continue to exercise the embedded server on CI runners. `SbtMcpPluginSpec` tests the
+startup decision, including the default CI guard and its explicit override.
 
 The real-client eval `SbtMcpKiroDocsSpec` is intentionally outside `scripted`: it
 connects to production `https://www.javadocs.dev/mcp`, verifies the proxied tools

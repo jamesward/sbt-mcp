@@ -32,9 +32,10 @@ The plugin triggers on all JVM projects but does nothing until you enable it.
 
 ```scala
 // build.sbt (or a local, git-ignored dev override)
-Global / mcpEnabled := true        // default: false
-Global / mcpPort    := 5010        // default: 5010
-Global / mcpHost    := "127.0.0.1" // default: loopback only
+Global / mcpEnabled     := true        // default: false
+Global / mcpDisableInCI := true        // default: true; set false to allow startup in CI
+Global / mcpPort        := 5010        // default: 5010
+Global / mcpHost        := "127.0.0.1" // default: loopback only
 ```
 
 When enabled, the server starts on the next sbt load and prints:
@@ -45,6 +46,12 @@ sbt-mcp: MCP server started at http://127.0.0.1:5010/ (loopback, no auth — dev
 
 Point an MCP client (Claude Code, Cursor, etc.) at `http://127.0.0.1:5010/`.
 `mcpStatus` prints whether the server is running.
+
+`mcpInstall` prints copy-pasteable onboarding for an AI agent: how to register this
+server in the local MCP client config (Kiro / Claude Code / Cursor) using the
+configured host/port, and the `AGENTS.md` usage guidance to adopt (drive sbt through
+the `sbt-task` tool, use `glob-search` / `inspect` / `symbol-location` for symbols).
+Run it directly or via the `sbt-task` tool so the text is returned to the agent.
 
 > **After enabling (or after a `reload`), reconnect your MCP client.** MCP clients
 > fetch the tool list once at connect time, so a client that connected before the
@@ -70,7 +77,8 @@ Point an MCP client (Claude Code, Cursor, etc.) at `http://127.0.0.1:5010/`.
 
 ### Multi-project builds
 
-`mcpEnabled` / `mcpPort` / `mcpHost` are **global** settings and exactly one MCP
+`mcpEnabled` / `mcpDisableInCI` / `mcpPort` / `mcpHost` are **global** settings
+and exactly one MCP
 server runs per build (shared by all subprojects and clients). The symbol index
 tracks a single active project — the current project when a symbol tool is invoked.
 Because the server is a single build-wide instance, `mcpStatus` does not aggregate
@@ -78,16 +86,19 @@ across subprojects — it prints one status line even on an aggregating root.
 
 ## Configuration
 
-| Setting        | Default       | Meaning                                  |
-|----------------|---------------|------------------------------------------|
-| `mcpEnabled`   | `false`       | Start the embedded MCP server on load    |
-| `mcpPort`      | `5010`        | Loopback port to bind                    |
-| `mcpHost`      | `"127.0.0.1"` | Interface to bind (keep on loopback)     |
-| `mcpDocsUrl`   | `Some("https://www.javadocs.dev/mcp")` | Upstream MCP server to proxy/merge; `None` disables |
+| Setting          | Default       | Meaning                                  |
+|------------------|---------------|------------------------------------------|
+| `mcpEnabled`     | `false`       | Start the embedded MCP server on load    |
+| `mcpDisableInCI` | `true`        | Do not start when `CI` is truthy; use `false` to override |
+| `mcpPort`        | `5010`        | Loopback port to bind                    |
+| `mcpHost`        | `"127.0.0.1"` | Interface to bind (keep on loopback)     |
+| `mcpDocsUrl`     | `Some("https://www.javadocs.dev/mcp")` | Upstream MCP server to proxy/merge; `None` disables |
 
 ## Security
 
 - **Off by default.** Nothing binds a port unless `mcpEnabled := true`.
+- **Disabled in CI by default.** Even when enabled, the server does not bind when
+  the `CI` environment variable has a truthy value unless `mcpDisableInCI := false`.
 - **Loopback only.** Binds `127.0.0.1`. Do **not** set `mcpHost` to `0.0.0.0`.
 - **No auth yet, and `sbt-task` can run arbitrary tasks** — treat the endpoint as a
   local, dev-only RCE surface. `zio-http-mcp` supports OAuth/token auth (`McpAuth`);

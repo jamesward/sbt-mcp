@@ -4,6 +4,8 @@ lazy val root = (project in file("."))
   .settings(
     name := "multi-protocol-test",
     Global / mcpEnabled := true,
+    // This fixture intentionally exercises the server even when scripted runs in CI.
+    Global / mcpDisableInCI := false,
     Global / mcpPort    := 5097,
     Global / mcpHost    := "127.0.0.1",
     // Proxy a LOCAL upstream MCP server (started by mcpCheckProtocols) instead of

@@ -29,7 +29,8 @@ import scala.concurrent.duration.*
  *   1. The lifecycle hooks live in [[globalSettings]] on `Global / onLoad` /
  *      `Global / onUnload`, which fire once per build load/unload — NOT once per
  *      aggregated project.
- *   2. `mcpEnabled` / `mcpPort` / `mcpHost` are global settings, so there is a
+ *   2. `mcpEnabled` / `mcpDisableInCI` / `mcpPort` / `mcpHost` are global settings,
+ *      so there is a
  *      single source of truth for whether/where the server runs.
  *   3. [[serverHandle]] is a process-global `AtomicReference` and [[maybeStartServer]]
  *      uses an atomic compare-and-set gate, so even if `onLoad` were invoked
@@ -42,12 +43,18 @@ object SbtMcpPlugin extends AutoPlugin {
 
   object autoImport {
     val mcpEnabled = settingKey[Boolean]("Start the embedded MCP server on sbt load (default false).")
-    val mcpPort    = settingKey[Int]("Loopback port for the embedded MCP server (default 5010).")
-    val mcpHost    = settingKey[String]("Interface to bind; keep on loopback (default 127.0.0.1).")
+    val mcpDisableInCI = settingKey[Boolean](
+      "Do not start the embedded MCP server when the CI environment variable is truthy (default true)."
+    )
+    val mcpPort = settingKey[Int]("Loopback port for the embedded MCP server (default 5010).")
+    val mcpHost = settingKey[String]("Interface to bind; keep on loopback (default 127.0.0.1).")
     val mcpDocsUrl = settingKey[Option[String]](
       "Upstream MCP server whose tools are proxied and merged with ours (default javadocs.dev). Set None to disable."
     )
     val mcpStatus  = taskKey[Unit]("Print embedded MCP server status.")
+    val mcpInstall = taskKey[Unit](
+      "Print instructions for an AI agent to register this sbt-mcp server in the local MCP client config and AGENTS.md."
+    )
   }
   import autoImport.*
 
@@ -73,10 +80,11 @@ object SbtMcpPlugin extends AutoPlugin {
   private final val RefreshCmd = "mcpRefreshIndexInternal"
 
   override lazy val globalSettings: Seq[Setting[?]] = Seq(
-    mcpEnabled := false,
-    mcpPort    := 5010,
-    mcpHost    := "127.0.0.1",
-    mcpDocsUrl := Some("https://www.javadocs.dev/mcp"),
+    mcpEnabled     := false,
+    mcpDisableInCI := true,
+    mcpPort        := 5010,
+    mcpHost        := "127.0.0.1",
+    mcpDocsUrl     := Some("https://www.javadocs.dev/mcp"),
     // `mcpExec <id>` runs a queued sbt-task ON the command loop (so it is
     // serialized with any `~` watch), then completes the waiting MCP request.
     commands += mcpExecCommand,
@@ -176,10 +184,15 @@ object SbtMcpPlugin extends AutoPlugin {
     // Opt out of sbt 2.x action caching: this task has side effects / reads
     // process-global state, so a cached (skipped) re-run would print nothing.
     mcpStatus := Def.uncached {
-      val log = streams.value.log
+      val log         = streams.value.log
+      val enabled     = mcpEnabled.value
+      val disableInCI = mcpDisableInCI.value
       serverHandle.get match {
         case Some(h) => log.info(s"sbt-mcp: running at http://${h.host}:${h.port}/")
-        case None    => log.info("sbt-mcp: not running (set `Global / mcpEnabled := true` to enable)")
+        case None if enabled && disableInCI && isCI(sys.env) =>
+          log.info("sbt-mcp: not running (disabled in CI; set `Global / mcpDisableInCI := false` to override)")
+        case None if enabled => log.info("sbt-mcp: not running (server startup failed or has not completed)")
+        case None            => log.info("sbt-mcp: not running (set `Global / mcpEnabled := true` to enable)")
       }
     },
     // The MCP server is a single process-global instance shared by the whole build,
@@ -187,6 +200,23 @@ object SbtMcpPlugin extends AutoPlugin {
     // `mcpStatus` on an aggregating root would aggregate to every subproject and print
     // the same line once per module. Disabling aggregation makes it print exactly once.
     mcpStatus / aggregate := false,
+    // Agent-facing onboarding: print how to register this server in the local MCP
+    // client config and what AGENTS.md guidance to add. Emitted via the task logger
+    // (streams.log) so the text is captured in the global log delta and returned to
+    // an agent that invokes it through the `sbt-task` MCP tool. Side-effecting +
+    // reads global settings, so opt out of action caching like `mcpStatus`.
+    mcpInstall := Def.uncached {
+      val log        = streams.value.log
+      val host       = mcpHost.value
+      val port       = mcpPort.value
+      val enabled    = mcpEnabled.value
+      val projName   = name.value
+      val serverName = if (projName.startsWith("sbt-mcp")) projName else s"sbt-mcp-$projName"
+      val url        = s"http://$host:$port/"
+      installInstructions(serverName, url, enabled, port).linesIterator.foreach(line => log.info(line))
+    },
+    // Single build-wide server (see mcpStatus): print the guidance once, not per module.
+    mcpInstall / aggregate := false,
   )
 
   /**
@@ -196,9 +226,14 @@ object SbtMcpPlugin extends AutoPlugin {
    */
   private def maybeStartServer(state: State): Unit = {
     if (serverHandle.get.isDefined) return
-    val extracted = Project.extract(state)
-    val enabled   = extracted.getOpt(mcpEnabled).getOrElse(false)
-    if (!enabled) return
+    val extracted   = Project.extract(state)
+    val enabled     = extracted.getOpt(mcpEnabled).getOrElse(false)
+    val disableInCI = extracted.getOpt(mcpDisableInCI).getOrElse(true)
+    if (!shouldStartServer(enabled, disableInCI, sys.env)) {
+      if (enabled && disableInCI && isCI(sys.env))
+        state.log.info("sbt-mcp: MCP server disabled in CI (set `Global / mcpDisableInCI := false` to override)")
+      return
+    }
     if (!starting.compareAndSet(false, true)) return // another thread is starting it
     try {
       if (serverHandle.get.isEmpty) {
@@ -207,7 +242,11 @@ object SbtMcpPlugin extends AutoPlugin {
         val docsUrl = extracted.getOpt(mcpDocsUrl).flatten
         val handle = McpServerRuntime.start(host, port, runCommand, () => refreshIndex(), () => taskInfos(currentState.get), docsUrl)
         serverHandle.set(Some(handle))
-        state.log.info(s"sbt-mcp: MCP server started at http://$host:$port/ (loopback, no auth — dev use only)")
+        state.log.info(
+          s"""sbt-mcp: MCP server started at http://$host:$port/
+             |sbt-mcp: Setup in an AI agent with this prompt:
+             |follow the instructions available via `./sbt mcpInstall` to setup sbt-mcp
+             |""".stripMargin)
       }
     } catch {
       case scala.util.control.NonFatal(e) =>
@@ -215,6 +254,86 @@ object SbtMcpPlugin extends AutoPlugin {
     } finally {
       starting.set(false)
     }
+  }
+
+  private[sbtmcp] def shouldStartServer(
+      enabled: Boolean,
+      disableInCI: Boolean,
+      environment: Map[String, String],
+  ): Boolean =
+    enabled && !(disableInCI && isCI(environment))
+
+  private def isCI(environment: Map[String, String]): Boolean =
+    environment.get("CI").exists { rawValue =>
+      val value = rawValue.trim
+      value.nonEmpty && value != "0" && !value.equalsIgnoreCase("false")
+    }
+
+  /**
+   * Build the agent-facing onboarding text printed by the `mcpInstall` task: how to
+   * register this server in the local MCP client config, and the AGENTS.md usage
+   * guidance an agent should adopt. `serverName` defaults to `sbt-mcp-<project name>`
+   * (rename freely); `url` is derived from the configured `mcpHost`/`mcpPort`.
+   */
+  private def installInstructions(serverName: String, url: String, enabled: Boolean, port: Int): String = {
+    val enableBlock =
+      if (enabled)
+        s"The server is enabled; once sbt is loaded it listens at $url."
+      else
+        s"""The MCP server is NOT enabled yet. Enable it by adding to build.sbt (or a
+           |git-ignored local dev override):
+           |
+           |    Global / mcpEnabled := true
+           |    Global / mcpPort    := $port
+           |
+           |then `reload` sbt so the server starts.""".stripMargin
+
+    s"""|=== sbt-mcp install instructions (for an AI agent) ===
+        |
+        |1) Enable and locate the server.
+        |
+        |$enableBlock
+        |
+        |2) Register the server in the local project's MCP client config. Add it to the
+        |   config file your agent reads (create the file if missing):
+        |     - Kiro:        .kiro/settings/mcp.json
+        |     - Claude Code: .mcp.json
+        |     - Cursor:      .cursor/mcp.json
+        |
+        |    {
+        |      "mcpServers": {
+        |        "$serverName": {
+        |          "type": "http",
+        |          "url": "$url",
+        |          "timeout": 120000,
+        |          "disabled": false
+        |        }
+        |      }
+        |    }
+        |
+        |   After (re)starting or `reload`-ing sbt, RECONNECT / re-init the MCP client so
+        |   it picks up the tool list (clients fetch tools once at connect time).
+        |
+        |3) Add this guidance to the project's AGENTS.md (create it if missing):
+        |
+        |## Build, Test & Dev Workflow
+        |
+        |- Use the MCP server named `$serverName` for ALL sbt interactions. Run
+        |  commands/tasks through its `sbt-task` tool; use `list-tasks` to discover
+        |  tasks/settings or get per-task help. Do not invoke `sbt`, a shell, or a
+        |  separate sbt client when the MCP tool is available. If the MCP server is
+        |  unavailable, state that clearly and use a direct CLI fallback only when
+        |  necessary. Separate multiple sbt commands with `;`.
+        |
+        |- Use `$serverName` for Scala/classpath symbol work: `glob-search` to
+        |  find/list symbols, `inspect` for members/signatures, and `symbol-location`
+        |  for source locations. Prefer these over text search, dependency-jar
+        |  inspection, or guessed APIs whenever the question is about Scala symbols.
+        |
+        |- JavaDoc/ScalaDoc lookups are available through the same server via its
+        |  proxied javadocs.dev tools.
+        |
+        |=== end sbt-mcp install instructions ===""".stripMargin
   }
 
   private def stopServer(log: Logger): Unit =
