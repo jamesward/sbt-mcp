@@ -1,8 +1,8 @@
 {
   "mcpServers": {
-    "sbt-mcp": {
+    "sbt-mcp-install-checks": {
       "url": "http://127.0.0.1:5010/",
-      "timeout": 1800000,
+      "timeout": 120000,
       "disabled": false
     }
   }

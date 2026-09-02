@@ -79,6 +79,11 @@ object SbtMcpPlugin extends AutoPlugin {
   private val pendingRefresh = new ConcurrentHashMap[String, Promise[Option[String]]]()
   private final val RefreshCmd = "mcpRefreshIndexInternal"
 
+  // Kept as named values so the generated client configuration and the server-side
+  // wait can be compared directly in fast regression tests.
+  private[sbtmcp] final val CommandWait              = 30.minutes
+  private[sbtmcp] final val RecommendedClientTimeout = CommandWait
+
   override lazy val globalSettings: Seq[Setting[?]] = Seq(
     mcpEnabled     := false,
     mcpDisableInCI := true,
@@ -113,12 +118,10 @@ object SbtMcpPlugin extends AutoPlugin {
       Option(pending.remove(id)) match {
         case None => state
         case Some((commandLine, promise)) =>
+          val startedAtNanos = System.nanoTime()
           val (_, result, output) = sbt.McpInProcess.runOnLoop(state, commandLine)
-          val status = result match {
-            case Right(_)  => s"[ok] $commandLine"
-            case Left(msg) => s"[error] $commandLine: $msg"
-          }
-          val text = if (output.isEmpty) status else s"$status\n$output"
+          val elapsedMillis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos)
+          val text = commandResultText(commandLine, result, output, elapsedMillis)
           promise.trySuccess(text)
           // Return the loop's ORIGINAL state: the sub-command ran for its effects
           // (compile/test results are on disk), but we must not leak its command-flow
@@ -127,6 +130,21 @@ object SbtMcpPlugin extends AutoPlugin {
           state
       }
     }
+
+  private[sbtmcp] def commandResultText(
+      commandLine: String,
+      result: Either[String, Unit],
+      output: String,
+      elapsedMillis: Long = 0L,
+  ): String = {
+    val status = result match {
+      case Right(_)  => s"[ok] $commandLine"
+      case Left(msg) => s"[error] $commandLine: $msg"
+    }
+    val evidence = s"elapsed: $elapsedMillis ms"
+    if (output.isEmpty) s"$status\n$evidence\ncaptured output: empty"
+    else s"$status\n$evidence\n$output"
+  }
 
   /**
    * Command that recomputes the symbol index ON the command loop and completes the
@@ -275,7 +293,7 @@ object SbtMcpPlugin extends AutoPlugin {
    * guidance an agent should adopt. `serverName` defaults to `sbt-mcp-<project name>`
    * (rename freely); `url` is derived from the configured `mcpHost`/`mcpPort`.
    */
-  private def installInstructions(serverName: String, url: String, enabled: Boolean, port: Int): String = {
+  private[sbtmcp] def installInstructions(serverName: String, url: String, enabled: Boolean, port: Int): String = {
     val enableBlock =
       if (enabled)
         s"The server is enabled; once sbt is loaded it listens at $url."
@@ -294,6 +312,16 @@ object SbtMcpPlugin extends AutoPlugin {
         |
         |$enableBlock
         |
+        |IMPORTANT: `mcpInstall` only prints guidance. It does not inspect or edit any
+        |existing config. Before adding the snippet below, check for the exact server
+        |key or another key with the same URL, then reconcile its name, type, URL,
+        |timeout, and disabled fields manually.
+        |
+        |`mcpInstall` does not daemonize sbt. A one-shot `./sbt mcpInstall` process
+        |exits after printing these instructions and its MCP server stops. Start a
+        |long-lived sbt session and keep it loaded; that session must remain running
+        |while the MCP client uses the server.
+        |
         |2) Register the server in the local project's MCP client config. Add it to the
         |   config file your agent reads (create the file if missing):
         |     - Kiro:        .kiro/settings/mcp.json
@@ -305,14 +333,18 @@ object SbtMcpPlugin extends AutoPlugin {
         |        "$serverName": {
         |          "type": "http",
         |          "url": "$url",
-        |          "timeout": 120000,
+        |          "timeout": ${RecommendedClientTimeout.toMillis},
         |          "disabled": false
         |        }
         |      }
         |    }
         |
-        |   After (re)starting or `reload`-ing sbt, RECONNECT / re-init the MCP client so
-        |   it picks up the tool list (clients fetch tools once at connect time).
+        |   After starting the long-lived sbt session, RECONNECT / re-init the MCP client
+        |   so it picks up the tool list (clients fetch tools once at connect time).
+        |
+        |   For plain direct capture without supershell / formatted logger sequences, use:
+        |
+        |       ./sbt --server --no-colors --supershell=false mcpInstall
         |
         |3) Add this guidance to the project's AGENTS.md (create it if missing):
         |
@@ -369,7 +401,7 @@ object SbtMcpPlugin extends AutoPlugin {
           pending.remove(id)
           "sbt-task: no sbt channel available yet (is an sbt session attached?)"
         } else {
-          try Await.result(promise.future, 30.minutes)
+          try Await.result(promise.future, CommandWait)
           catch {
             case _: TimeoutException =>
               pending.remove(id)

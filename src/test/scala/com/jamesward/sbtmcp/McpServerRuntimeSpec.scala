@@ -1,11 +1,14 @@
 package com.jamesward.sbtmcp
 
+import com.jamesward.ziohttp.mcp.client.McpClient
 import zio.*
+import zio.http.Client
+import zio.json.ast.Json
 import zio.test.*
 
 import java.net.{ InetSocketAddress, ServerSocket, Socket }
 import java.util.concurrent.{ CountDownLatch, TimeUnit }
-import java.util.concurrent.atomic.AtomicReference
+import java.util.concurrent.atomic.{ AtomicInteger, AtomicReference }
 
 object McpServerRuntimeSpec extends ZIOSpecDefault:
 
@@ -68,11 +71,14 @@ object McpServerRuntimeSpec extends ZIOSpecDefault:
       finally socket.close()
     }
 
-  private def startServer(port: Int): Task[McpServerRuntime.Handle] =
+  private def startServer(
+      port: Int,
+      runCommand: String => String = command => s"[ok] $command",
+  ): Task[McpServerRuntime.Handle] =
     ZIO.attempt(McpServerRuntime.start(
       host       = Host,
       port       = port,
-      runCommand = command => s"[ok] $command",
+      runCommand = runCommand,
       refresh    = () => None,
       listTasks  = () => Nil,
       docsUrl    = None,
@@ -99,5 +105,46 @@ object McpServerRuntimeSpec extends ZIOSpecDefault:
       ZIO.acquireRelease(ZIO.attemptBlocking(ServerSocket(0)))(socket => ZIO.attemptBlocking(socket.close()).orDie)
         .flatMap(socket => startServer(socket.getLocalPort).exit)
         .map(exit => assertTrue(exit.isFailure))
+    },
+    test("issue 1: a task outliving the old scaled client timeout returns exactly once") {
+      val executions = AtomicInteger(0)
+      val runCommand: String => String = command => {
+        executions.incrementAndGet()
+        Thread.sleep(150)
+        s"[ok] $command"
+      }
+
+      for
+        port   <- freePort
+        handle <- startServer(port, runCommand)
+        result <- ZIO
+                    .scoped {
+                      McpClient.connect(s"http://$Host:$port/").flatMap { client =>
+                        client
+                          .callTool("sbt-task", Json.Obj("command" -> Json.Str("slow")))
+                          .timeout(750.millis)
+                          .map(response => assertTrue(response.isDefined, executions.get() == 1))
+                      }
+                    }
+                    .provide(Client.default)
+                    .ensuring(closeWithin(handle).ignore)
+      yield result
+    },
+    test("issue 3: initialize exposes the generated artifact version") {
+      for
+        port   <- freePort
+        handle <- startServer(port)
+        result <- ZIO
+                    .scoped {
+                      McpClient.connect(s"http://$Host:$port/").map { client =>
+                        assertTrue(
+                          client.serverInfo.name == "sbt-mcp",
+                          client.serverInfo.version == McpBuildInfo.version,
+                        )
+                      }
+                    }
+                    .provide(Client.default)
+                    .ensuring(closeWithin(handle).ignore)
+      yield result
     },
   ) @@ TestAspect.withLiveClock @@ TestAspect.sequential

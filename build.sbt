@@ -32,6 +32,22 @@ developers := List(
 )
 versionScheme := Some("semver-spec")
 
+
+// Generate the runtime MCP identity from the same sbt `version` used to publish
+// the plugin, avoiding a second hard-coded implementation version.
+Compile / sourceGenerators += Def.task {
+  val output = (Compile / sourceManaged).value / "com" / "jamesward" / "sbtmcp" / "McpBuildInfo.scala"
+  val escapedVersion = version.value.replace("\\", "\\\\").replace("\"", "\\\"")
+  IO.write(
+    output,
+    s"""package com.jamesward.sbtmcp
+       |
+       |private[sbtmcp] object McpBuildInfo:
+       |  final val version: String = "$escapedVersion"
+       |""".stripMargin,
+  )
+  Seq(output)
+}.taskValue
 javacOptions ++= Seq("-source", "17", "-target", "17")
 scalacOptions ++= Seq("-release", "17", "-Werror")
 

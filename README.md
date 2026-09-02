@@ -51,7 +51,19 @@ Point an MCP client (Claude Code, Cursor, etc.) at `http://127.0.0.1:5010/`.
 server in the local MCP client config (Kiro / Claude Code / Cursor) using the
 configured host/port, and the `AGENTS.md` usage guidance to adopt (drive sbt through
 the `sbt-task` tool, use `glob-search` / `inspect` / `symbol-location` for symbols).
+It is deliberately non-mutating: it does not inspect or edit existing config, so
+reconcile any existing key that uses the same URL manually. The generated HTTP
+client timeout is 30 minutes, matching the server-side task wait.
+
 Run it directly or via the `sbt-task` tool so the text is returned to the agent.
+For plain direct capture without sbt supershell/logger control sequences, use:
+
+```bash
+./sbt --server --no-colors --supershell=false mcpInstall
+```
+
+`mcpInstall` does not daemonize sbt. A one-shot invocation exits after printing and
+stops its embedded server; keep a long-lived sbt session loaded while clients use MCP.
 
 > **After enabling (or after a `reload`), reconnect your MCP client.** MCP clients
 > fetch the tool list once at connect time, so a client that connected before the
@@ -71,9 +83,9 @@ Run it directly or via the `sbt-task` tool so the text is returned to the agent.
   build (e.g. via `sbt-task`) before new symbols will appear.
 - **Running tasks.** `sbt-task` (e.g. `{"command":"compile"}`, `{"command":"test"}`,
   `{"command":"testOnly com.example.MySpec"}`) runs on sbt's command loop and works
-  even while a `~` watch is active. It returns the status plus captured compiler
-  output. It needs an sbt session attached; if another command is running it waits
-  its turn.
+  even while a `~` watch is active. It returns status, elapsed milliseconds, and
+  either captured compiler output or an explicit `captured output: empty` marker.
+  It needs an sbt session attached; if another command is running it waits its turn.
 
 ### Multi-project builds
 

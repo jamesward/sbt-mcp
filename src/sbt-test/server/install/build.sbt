@@ -15,8 +15,10 @@ lazy val root = (project in file("."))
 // streams.log, which sbt mirrors to the global log backing file; read that file and
 // check the expected content is present (and the server name isn't double-prefixed).
 TaskKey[Unit]("checkInstall", "Verify mcpInstall printed the expected instructions") := Def.uncached {
-  val log = streams.value.log
-  val txt = IO.read(state.value.globalLogging.backing.file)
+  val log        = streams.value.log
+  val txt        = IO.read(state.value.globalLogging.backing.file)
+  val configFile = baseDirectory.value / ".kiro" / "settings" / "mcp.json"
+  val staleConfig = IO.read(configFile)
 
   assert(txt.contains("=== sbt-mcp install instructions (for an AI agent) ==="),
     "mcpInstall did not print the instructions banner")
@@ -31,5 +33,22 @@ TaskKey[Unit]("checkInstall", "Verify mcpInstall printed the expected instructio
   assert(!txt.contains("sbt-mcp-sbt-mcp"),
     "mcpInstall produced a doubled `sbt-mcp-` server-name prefix")
 
-  log.info("checkInstall OK: mcpInstall instructions present, server name not double-prefixed")
+  // ISSUE.md issue 2: the non-mutating installer must prominently explain that
+  // existing registrations are not inspected or edited and how to reconcile them.
+  assert(staleConfig.contains("\"sbt-mcp-install-checks\""),
+    "the non-mutating installer unexpectedly changed the stale fixture")
+  assert(!staleConfig.contains("\"type\": \"http\""),
+    "the non-mutating installer unexpectedly edited the config")
+  assert(txt.toLowerCase.contains("does not inspect or edit") && txt.toLowerCase.contains("same url"),
+    "mcpInstall did not explain manual existing-config reconciliation")
+
+  // Lifecycle and direct capture must be explicit for one-shot/agent workflows.
+  assert(txt.toLowerCase.contains("does not daemonize") && txt.toLowerCase.contains("remain running"),
+    "mcpInstall did not explain the long-lived sbt lifecycle")
+  assert(txt.contains("--server") && txt.contains("--no-colors") && txt.contains("--supershell=false"),
+    "mcpInstall did not provide a plain direct-capture command")
+  assert(!txt.contains("\u001B[0J"),
+    "the installer instruction log unexpectedly contains terminal erase sequences")
+
+  log.info("checkInstall OK: stale config is preserved with reconciliation, lifecycle, and plain-capture guidance")
 }

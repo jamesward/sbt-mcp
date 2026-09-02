@@ -51,18 +51,24 @@ TaskKey[Unit]("mcpCheckTools", "Verify the MCP server advertises tools and inspe
           tools   <- client.listTools
           inspect <- client.callTool("inspect", Json.Obj("symbol" -> Json.Str("example.Widget")))
           tasks   <- client.callTool("list-tasks", Json.Obj())
-        } yield (tools.map(_.name.toString).toSet, textOf(inspect), textOf(tasks))
+        } yield (tools.map(_.name.toString).toSet, textOf(inspect), textOf(tasks), client.serverInfo)
       }
       .retry(Schedule.recurs(25) && Schedule.spaced(200.millis))
 
-  val (toolNames, inspectOut, tasksOut) =
+  val (toolNames, inspectOut, tasksOut, serverInfo) =
     Unsafe.unsafe { implicit u => Runtime.default.unsafe.run(prog.provide(Client.default)).getOrThrow() }
 
-  val required = Set("sbt-task", "list-tasks", "glob-search", "inspect", "symbol-location")
+  val required        = Set("sbt-task", "list-tasks", "glob-search", "inspect", "symbol-location")
+  val artifactVersion = sys.props("plugin.version")
   assert(required.subsetOf(toolNames), s"missing MCP tools; got: $toolNames")
   assert(inspectOut.contains("label"), s"inspect(example.Widget) did not include 'label':\n$inspectOut")
   assert(tasksOut.contains("compile"), s"list-tasks did not include 'compile':\n$tasksOut")
-  log.info(s"mcpCheckTools OK: tools=$toolNames")
+  assert(serverInfo.name == "sbt-mcp", s"unexpected MCP server name: $serverInfo")
+  assert(
+    serverInfo.version == artifactVersion,
+    s"runtime MCP version must match the loaded plugin artifact: $serverInfo vs $artifactVersion"
+  )
+  log.info(s"mcpCheckTools OK: tools=$toolNames, runtimeVersion=${serverInfo.version}, artifactVersion=$artifactVersion")
 }
 
 // Verify the in-process command primitive that `sbt-task` uses: run a real command

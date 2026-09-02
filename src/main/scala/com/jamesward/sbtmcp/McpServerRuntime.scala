@@ -64,7 +64,7 @@ object McpServerRuntime {
     )
 
     val base: McpServer[Any] =
-      McpServer("sbt-mcp", "0.1.0")
+      McpServer("sbt-mcp", McpBuildInfo.version)
         .instructions(
           "Tools for driving a Scala/sbt build: run sbt tasks, and search/inspect Scala 3 " +
             "symbols read from TASTy. The symbol index refreshes automatically before each query. " +
@@ -168,8 +168,9 @@ object McpServerRuntime {
           "console output (compiler warnings and errors included). The command is queued onto " +
           "sbt's command loop (in-process — no separate sbt server connection) and runs there, " +
           "so it works even while a `~` watch is active (it runs between the watch's file-change " +
-          "triggers, serialized with it). Result is `[ok] <cmd>` or `[error] <cmd>: …` followed " +
-          "by the output. Examples: `compile`, `test`, `myProject/compile`, " +
+          "triggers, serialized with it). Every result includes elapsed milliseconds and either " +
+          "captured console output or an explicit `captured output: empty` marker. Status is " +
+          "`[ok] <cmd>` or `[error] <cmd>: …`. Examples: `compile`, `test`, `myProject/compile`, " +
           "`testOnly com.example.MySpec`, `clean`."
       )
       // Running arbitrary sbt tasks can mutate the project and the world.

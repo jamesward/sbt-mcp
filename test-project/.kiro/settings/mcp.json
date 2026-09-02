@@ -3,7 +3,7 @@
     "sbt-mcp-test-project": {
       "type": "http",
       "url": "http://127.0.0.1:5011/",
-      "timeout": 120000,
+      "timeout": 1800000,
       "disabled": false
     }
   }
