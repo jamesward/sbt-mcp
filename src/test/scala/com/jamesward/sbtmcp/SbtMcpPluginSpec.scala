@@ -25,9 +25,23 @@ object SbtMcpPluginSpec extends ZIOSpecDefault:
         !SbtMcpPlugin.shouldStartServer(enabled = true, disableInCI = true, environment = Map("CI" -> "1")),
       )
     },
-    test("can explicitly start in CI") {
+    test("does not start in Heroku builds when CI disabling is enabled") {
       assertTrue(
-        SbtMcpPlugin.shouldStartServer(enabled = true, disableInCI = false, environment = Map("CI" -> "true"))
+        !SbtMcpPlugin.shouldStartServer(
+          enabled     = true,
+          disableInCI = true,
+          environment = Map("SOURCE_VERSION" -> "0123456789abcdef"),
+        )
+      )
+    },
+    test("can explicitly start in CI and Heroku builds") {
+      assertTrue(
+        SbtMcpPlugin.shouldStartServer(enabled = true, disableInCI = false, environment = Map("CI" -> "true")),
+        SbtMcpPlugin.shouldStartServer(
+          enabled     = true,
+          disableInCI = false,
+          environment = Map("SOURCE_VERSION" -> "0123456789abcdef"),
+        ),
       )
     },
     test("false-like CI values are not treated as CI") {
@@ -35,6 +49,11 @@ object SbtMcpPluginSpec extends ZIOSpecDefault:
         SbtMcpPlugin.shouldStartServer(enabled = true, disableInCI = true, environment = Map("CI" -> "false")),
         SbtMcpPlugin.shouldStartServer(enabled = true, disableInCI = true, environment = Map("CI" -> "0")),
         SbtMcpPlugin.shouldStartServer(enabled = true, disableInCI = true, environment = Map("CI" -> "")),
+        SbtMcpPlugin.shouldStartServer(
+          enabled     = true,
+          disableInCI = true,
+          environment = Map("SOURCE_VERSION" -> "  "),
+        ),
       )
     },
     test("issue 1: generated client timeout covers the full server command wait") {

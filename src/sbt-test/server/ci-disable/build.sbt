@@ -5,7 +5,7 @@ Global / mcpPort    := 5096
 Global / mcpHost    := "127.0.0.1"
 Global / mcpDocsUrl := None
 
-TaskKey[Unit]("checkCiDisable", "Verify the default CI startup guard") := {
+TaskKey[Unit]("checkCiDisable", "Verify the default CI and Heroku startup guard") := {
   val disableInCI = (Global / mcpDisableInCI).value
   assert(disableInCI, s"mcpDisableInCI should default to true, was $disableInCI")
 
@@ -13,11 +13,15 @@ TaskKey[Unit]("checkCiDisable", "Verify the default CI startup guard") := {
     val value = rawValue.trim
     value.nonEmpty && value != "0" && !value.equalsIgnoreCase("false")
   }
-  if (inCI) {
+  val onHeroku = sys.env.get("SOURCE_VERSION").exists(_.trim.nonEmpty)
+  val automatedBuild = inCI || onHeroku
+  if (automatedBuild) {
     val socket = new java.net.ServerSocket()
     try socket.bind(new java.net.InetSocketAddress("127.0.0.1", (Global / mcpPort).value))
     finally socket.close()
   }
 
-  streams.value.log.info(s"checkCiDisable OK: default=$disableInCI, inCI=$inCI")
+  streams.value.log.info(
+    s"checkCiDisable OK: default=$disableInCI, inCI=$inCI, onHeroku=$onHeroku"
+  )
 }

@@ -33,7 +33,7 @@ The plugin triggers on all JVM projects but does nothing until you enable it.
 ```scala
 // build.sbt (or a local, git-ignored dev override)
 Global / mcpEnabled     := true        // default: false
-Global / mcpDisableInCI := true        // default: true; set false to allow startup in CI
+Global / mcpDisableInCI := true        // default: true; set false to allow startup in CI/Heroku
 Global / mcpPort        := 5010        // default: 5010
 Global / mcpHost        := "127.0.0.1" // default: loopback only
 ```
@@ -101,7 +101,7 @@ across subprojects — it prints one status line even on an aggregating root.
 | Setting          | Default       | Meaning                                  |
 |------------------|---------------|------------------------------------------|
 | `mcpEnabled`     | `false`       | Start the embedded MCP server on load    |
-| `mcpDisableInCI` | `true`        | Do not start when `CI` is truthy; use `false` to override |
+| `mcpDisableInCI` | `true`        | Do not start when `CI` is truthy or `SOURCE_VERSION` identifies a Heroku build; use `false` to override |
 | `mcpPort`        | `5010`        | Loopback port to bind                    |
 | `mcpHost`        | `"127.0.0.1"` | Interface to bind (keep on loopback)     |
 | `mcpDocsUrl`     | `Some("https://www.javadocs.dev/mcp")` | Upstream MCP server to proxy/merge; `None` disables |
@@ -109,8 +109,9 @@ across subprojects — it prints one status line even on an aggregating root.
 ## Security
 
 - **Off by default.** Nothing binds a port unless `mcpEnabled := true`.
-- **Disabled in CI by default.** Even when enabled, the server does not bind when
-  the `CI` environment variable has a truthy value unless `mcpDisableInCI := false`.
+- **Disabled in automated builds by default.** Even when enabled, the server does
+  not bind when `CI` is truthy or Heroku provides a nonblank `SOURCE_VERSION`, unless
+  `mcpDisableInCI := false`.
 - **Loopback only.** Binds `127.0.0.1`. Do **not** set `mcpHost` to `0.0.0.0`.
 - **No auth yet, and `sbt-task` can run arbitrary tasks** — treat the endpoint as a
   local, dev-only RCE surface. `zio-http-mcp` supports OAuth/token auth (`McpAuth`);

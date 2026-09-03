@@ -1,2 +1,2 @@
-# mcpDisableInCI defaults to true. Under CI, prove the enabled server did not bind.
+# mcpDisableInCI defaults to true. Under CI or Heroku, prove the enabled server did not bind.
 > checkCiDisable

@@ -44,7 +44,7 @@ object SbtMcpPlugin extends AutoPlugin {
   object autoImport {
     val mcpEnabled = settingKey[Boolean]("Start the embedded MCP server on sbt load (default false).")
     val mcpDisableInCI = settingKey[Boolean](
-      "Do not start the embedded MCP server when the CI environment variable is truthy (default true)."
+      "Do not start the embedded MCP server in CI or Heroku builds (default true)."
     )
     val mcpPort = settingKey[Int]("Loopback port for the embedded MCP server (default 5010).")
     val mcpHost = settingKey[String]("Interface to bind; keep on loopback (default 127.0.0.1).")
@@ -207,8 +207,10 @@ object SbtMcpPlugin extends AutoPlugin {
       val disableInCI = mcpDisableInCI.value
       serverHandle.get match {
         case Some(h) => log.info(s"sbt-mcp: running at http://${h.host}:${h.port}/")
-        case None if enabled && disableInCI && isCI(sys.env) =>
-          log.info("sbt-mcp: not running (disabled in CI; set `Global / mcpDisableInCI := false` to override)")
+        case None if enabled && disableInCI && isAutomatedBuild(sys.env) =>
+          log.info(
+            "sbt-mcp: not running (disabled in CI or a Heroku build; set `Global / mcpDisableInCI := false` to override)"
+          )
         case None if enabled => log.info("sbt-mcp: not running (server startup failed or has not completed)")
         case None            => log.info("sbt-mcp: not running (set `Global / mcpEnabled := true` to enable)")
       }
@@ -248,8 +250,10 @@ object SbtMcpPlugin extends AutoPlugin {
     val enabled     = extracted.getOpt(mcpEnabled).getOrElse(false)
     val disableInCI = extracted.getOpt(mcpDisableInCI).getOrElse(true)
     if (!shouldStartServer(enabled, disableInCI, sys.env)) {
-      if (enabled && disableInCI && isCI(sys.env))
-        state.log.info("sbt-mcp: MCP server disabled in CI (set `Global / mcpDisableInCI := false` to override)")
+      if (enabled && disableInCI && isAutomatedBuild(sys.env))
+        state.log.info(
+          "sbt-mcp: MCP server disabled in CI or a Heroku build (set `Global / mcpDisableInCI := false` to override)"
+        )
       return
     }
     if (!starting.compareAndSet(false, true)) return // another thread is starting it
@@ -279,13 +283,19 @@ object SbtMcpPlugin extends AutoPlugin {
       disableInCI: Boolean,
       environment: Map[String, String],
   ): Boolean =
-    enabled && !(disableInCI && isCI(environment))
+    enabled && !(disableInCI && isAutomatedBuild(environment))
 
-  private def isCI(environment: Map[String, String]): Boolean =
-    environment.get("CI").exists { rawValue =>
-      val value = rawValue.trim
-      value.nonEmpty && value != "0" && !value.equalsIgnoreCase("false")
-    }
+  private final val CiEnvironmentVariable                  = "CI"
+  private final val HerokuSourceVersionEnvironmentVariable = "SOURCE_VERSION"
+
+  private def isAutomatedBuild(environment: Map[String, String]): Boolean =
+    environment.get(CiEnvironmentVariable).exists(isTruthy) ||
+      environment.get(HerokuSourceVersionEnvironmentVariable).exists(_.trim.nonEmpty)
+
+  private def isTruthy(rawValue: String): Boolean = {
+    val value = rawValue.trim
+    value.nonEmpty && value != "0" && !value.equalsIgnoreCase("false")
+  }
 
   /**
    * Build the agent-facing onboarding text printed by the `mcpInstall` task: how to
