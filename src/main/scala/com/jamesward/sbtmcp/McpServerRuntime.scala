@@ -219,7 +219,8 @@ object McpServerRuntime {
   private def globSearchTool(refresh: () => Option[String]): McpToolHandler =
     McpTool("glob-search")
       .description(
-        "Search Scala 3 symbols by unqualified name across the active project's classpath (TASTy). " +
+        "Search Scala 3 symbols by unqualified name across the active project's classpath, including " +
+          "transitive aggregated subprojects (TASTy). " +
           "Set `inPackage` to restrict to a package (recommended — searching the whole classpath is " +
           "slow). Use `query`=\"*\" (or empty) to LIST ALL symbols in that package — e.g. " +
           "{\"query\":\"*\",\"inPackage\":\"com.example\"} lists everything in com.example. Returns " +

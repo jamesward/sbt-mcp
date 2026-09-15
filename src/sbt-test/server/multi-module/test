@@ -4,3 +4,8 @@
 # (mcpStatus/aggregate = false) that guarantees this.
 > mcpStatus
 > checkStatusNoAggregate
+
+# Compile all aggregated modules, then query through the real MCP handlers while
+# the root is active. Both module-only symbols should be visible from the root.
+> compile
+> checkMultiModuleSymbols

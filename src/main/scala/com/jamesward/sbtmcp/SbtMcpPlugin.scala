@@ -165,18 +165,42 @@ object SbtMcpPlugin extends AutoPlugin {
   /**
    * Recompute the current project's classpath and (re)index its symbols. MUST be
    * called ON the command loop (it runs the task engine): from the internal refresh
-   * command, or directly from a build's own command. Uses `fullClasspathAsJars` so
-   * the project's freshly-compiled `.tasty` is packaged into a content-hashed jar;
-   * the hashes form the fingerprint that [[SymbolIndexState]] uses to skip rebuilding
-   * the tasty-query context when nothing changed.
+   * command, or directly from a build's own command. For an aggregating project,
+   * traverses all transitive aggregates and merges their `fullClasspathAsJars`
+   * results into the active index; a leaf project still indexes only itself. The
+   * content-hashed jars form the fingerprint that [[SymbolIndexState]] uses to skip
+   * rebuilding the tasty-query context when nothing changed.
    */
   def refreshFromState(state: State): Unit = {
-    val extracted   = Project.extract(state)
-    val (_, cp)     = extracted.runTask(Compile / fullClasspathAsJars, state)
-    val converter   = extracted.get(fileConverter)
-    val entries     = cp.map(a => converter.toPath(a.data)).toList
-    val fingerprint = cp.map(_.data.contentHashStr).toVector
+    val extracted = Project.extract(state)
+    val converter = extracted.get(fileConverter)
+    val classpath = scala.collection.mutable.LinkedHashMap.empty[java.nio.file.Path, String]
+    var taskState = state
+
+    aggregateProjectRefs(extracted).foreach { ref =>
+      val (nextState, cp) = extracted.runTask(ref / Compile / fullClasspathAsJars, taskState)
+      taskState = nextState
+      cp.foreach { attributed =>
+        val path = converter.toPath(attributed.data)
+        classpath.getOrElseUpdate(path, attributed.data.contentHashStr)
+      }
+    }
+
+    val entries = classpath.keysIterator.toList
+    val fingerprint = classpath.iterator.map { case (path, hash) => s"$path\u0000$hash" }.toVector
     SymbolIndexState.update(extracted.currentRef.project, entries, fingerprint)
+  }
+
+  /** Current project followed by all of its transitive aggregates, once each. */
+  private[sbtmcp] def aggregateProjectRefs(extracted: Extracted): Vector[ProjectRef] = {
+    val seen = scala.collection.mutable.LinkedHashSet.empty[ProjectRef]
+
+    def visit(ref: ProjectRef): Unit =
+      if (seen.add(ref))
+        extracted.structure.extra.projectFor(ref).aggregate.foreach(visit)
+
+    visit(extracted.currentRef)
+    seen.toVector
   }
 
   /**

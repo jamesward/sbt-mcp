@@ -93,6 +93,8 @@ stops its embedded server; keep a long-lived sbt session loaded while clients us
 and exactly one MCP
 server runs per build (shared by all subprojects and clients). The symbol index
 tracks a single active project — the current project when a symbol tool is invoked.
+When that project aggregates other projects, its index includes all transitive
+aggregates; selecting a leaf project scopes queries to that leaf's classpath.
 Because the server is a single build-wide instance, `mcpStatus` does not aggregate
 across subprojects — it prints one status line even on an aggregating root.
 

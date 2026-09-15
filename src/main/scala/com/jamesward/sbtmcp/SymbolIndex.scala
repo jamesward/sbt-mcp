@@ -21,10 +21,9 @@ import tastyquery.jdk.ClasspathLoaders
  * threads) pull a lazily-built, cached tasty-query `Context` out. This decouples
  * symbol queries from sbt's single-threaded task engine.
  *
- * Multi-module note: entries are keyed by project id. `activeProject` selects
- * which project's classpath backs a query; the last refresh wins by default so a
- * bare `glob-search` targets whatever was most recently refreshed. A future
- * revision can expose the project as a tool argument.
+ * Multi-module note: entries are keyed by active project id. The last refresh wins,
+ * and an aggregating project's entry contains its own classpath plus all transitive
+ * aggregates. A future revision can expose the project as a tool argument.
  */
 object SymbolIndexState {
   private final case class Entry(entries: List[Path], fingerprint: Vector[String], context: Option[Context])

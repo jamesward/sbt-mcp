@@ -44,7 +44,8 @@ zio-http 3.11.3 / zio-schema 1.8.6), tasty-query **1.8.0**, Scala **3.8.4**.
 - **Symbol tools auto-refresh, decoupled from the task engine.** `glob-search` /
   `inspect` / `symbol-location` run on zio-http threads. Before each query they
   enqueue an internal refresh onto the command loop (`SbtMcpPlugin.refreshFromState`
-  runs `Compile/fullClasspathAsJars` for the current project → the process-global
+  runs `Compile/fullClasspathAsJars` for the current project and every transitive
+  aggregate, deduplicates their classpaths, then updates the process-global
   `SymbolIndexState`), from which the tools lazily build a cached
   [`tasty-query`](https://github.com/scalacenter/tasty-query) `Context` (plus the
   JRE's `java.base`). Properties:
@@ -98,8 +99,9 @@ channel `append`) — the same family as `State.unsafeRunTask`.
   signatures. Kinds are `class`/`object`/`trait`/`type`/`method`/`term`.
 - **Multi-module symbol scope.** `SymbolIndexState` keys entries by project id but
   keeps a single *active* project (the last auto-refresh wins — the current project
-  when a symbol tool is invoked). Exposing the target project as a tool argument is a
-  planned enhancement.
+  when a symbol tool is invoked). An aggregating active project includes all of its
+  transitive aggregates; a leaf includes only its own classpath. Exposing a different
+  target project as a tool argument is a planned enhancement.
 - **`get-docs` is out of scope** — proxy `javadocs.dev` (MCP or API) instead.
 
 ## Running without publishing
