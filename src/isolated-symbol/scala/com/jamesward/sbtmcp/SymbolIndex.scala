@@ -3,6 +3,7 @@ package com.jamesward.sbtmcp
 import scala.collection.mutable
 import scala.util.control.NonFatal
 
+import tastyquery.Classpaths.ClasspathEntry
 import tastyquery.Contexts.Context
 import tastyquery.Symbols.*
 
@@ -25,12 +26,20 @@ object SymbolIndex {
 
   final case class Hit(kind: String, fqn: String)
 
-  def globSearch(query: String, inPackage: Option[String] = None, limit: Int = 100)(using
-      ctx: Context
-  ): List[Hit] = {
-    val q       = query.toLowerCase.trim
-    val listAll = q.isEmpty || q == "*"
-    val out     = mutable.ListBuffer.empty[Hit]
+  def globSearch(
+      query: String,
+      inPackage: Option[String] = None,
+      limit: Int = 100,
+      searchEntries: List[ClasspathEntry] = Nil,
+  )(using ctx: Context): List[Hit] = {
+    val q             = query.toLowerCase.trim
+    val listAll       = q.isEmpty || q == "*"
+    val out           = mutable.ListBuffer.empty[Hit]
+    val deadlineNanos = System.nanoTime() + java.util.concurrent.TimeUnit.SECONDS.toNanos(10)
+    var visited       = 0
+
+    def withinBudget: Boolean =
+      visited < 20000 && System.nanoTime() < deadlineNanos
 
     def matches(name: String): Boolean =
       listAll || {
@@ -45,21 +54,31 @@ object SymbolIndex {
     def kindOf(cls: ClassSymbol): String =
       if (cls.isModuleClass) "object" else if (cls.isTrait) "trait" else "class"
 
+    def addMember(kind: String, sym: Symbol, name: String): Unit =
+      if out.size < limit && withinBudget then
+        visited += 1
+        if matches(name) then out += Hit(kind, fqn(sym))
+
     def visit(sym: Symbol): Unit = {
-      if (out.size >= limit) return
+      if (out.size >= limit || !withinBudget) return
+      visited += 1
       try
         sym match {
           case pkg: PackageSymbol =>
-            pkg.declarations.foreach(visit)
+            pkg.declarations.iterator
+              .takeWhile(_ => out.size < limit && withinBudget)
+              .foreach(visit)
           case cls: ClassSymbol =>
             if (matches(cls.name.toString)) out += Hit(kindOf(cls), fqn(cls))
             // ClassSymbol.declarations is List[TermOrTypeSymbol] (sealed:
             // TermSymbol | TypeSymbol), so these cases are exhaustive.
-            cls.declarations.foreach {
-              case nested: ClassSymbol => visit(nested)
-              case t: TermSymbol       => if (matches(t.name.toString)) out += Hit("method", fqn(t))
-              case ty: TypeSymbol      => if (matches(ty.name.toString)) out += Hit("type", fqn(ty))
-            }
+            cls.declarations.iterator
+              .takeWhile(_ => out.size < limit && withinBudget)
+              .foreach {
+                case nested: ClassSymbol => visit(nested)
+                case t: TermSymbol       => addMember("method", t, t.name.toString)
+                case ty: TypeSymbol      => addMember("type", ty, ty.name.toString)
+              }
           case t: TermSymbol =>
             if (matches(t.name.toString)) out += Hit("term", fqn(t))
           case ty: TypeSymbol =>
@@ -68,13 +87,33 @@ object SymbolIndex {
       catch { case NonFatal(_) => () } // some symbols fail to force; skip them
     }
 
-    val roots: List[Symbol] =
-      inPackage match {
-        case Some(pkg) =>
-          try List(ctx.findPackage(pkg))
-          catch { case NonFatal(_) => Nil } // unknown package => no results
-        case None => List(ctx.defn.RootPackage)
+    def inRequestedPackage(sym: Symbol): Boolean =
+      inPackage.forall { pkg =>
+        val fullName = fqn(sym)
+        fullName == pkg || fullName.startsWith(pkg + ".")
       }
+
+    var rootsScanned = 0
+    val roots: Iterator[Symbol] =
+      if searchEntries.nonEmpty then
+        searchEntries.iterator
+          .flatMap { entry =>
+            try ctx.findSymbolsByClasspathEntry(entry).iterator
+            catch { case NonFatal(_) => Iterator.empty }
+          }
+          .takeWhile { _ =>
+            val allowed = rootsScanned < 10000 && out.size < limit && System.nanoTime() < deadlineNanos
+            rootsScanned += 1
+            allowed
+          }
+          .filter(inRequestedPackage)
+      else
+        (inPackage match {
+          case Some(pkg) =>
+            try List(ctx.findPackage(pkg))
+            catch { case NonFatal(_) => Nil }
+          case None => List(ctx.defn.RootPackage)
+        }).iterator
     roots.foreach(visit)
     out.toList.distinct
   }

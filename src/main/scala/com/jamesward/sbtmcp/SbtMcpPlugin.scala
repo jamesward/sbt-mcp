@@ -175,7 +175,8 @@ object SbtMcpPlugin extends AutoPlugin {
   def refreshFromState(state: State): Unit = {
     val extracted = Project.extract(state)
     val converter = extracted.get(fileConverter)
-    val classpath = scala.collection.mutable.LinkedHashMap.empty[java.nio.file.Path, String]
+    val classpath    = scala.collection.mutable.LinkedHashMap.empty[java.nio.file.Path, String]
+    val searchEntries = scala.collection.mutable.LinkedHashSet.empty[java.nio.file.Path]
     var taskState = state
 
     val refs = aggregateProjectRefs(extracted)
@@ -189,6 +190,7 @@ object SbtMcpPlugin extends AutoPlugin {
     refs.foreach { ref =>
       val (nextState, cp) = extracted.runTask(ref / Compile / fullClasspathAsJars, taskState)
       taskState = nextState
+      cp.headOption.foreach(attributed => searchEntries += converter.toPath(attributed.data))
       cp.foreach { attributed =>
         val path = converter.toPath(attributed.data)
         classpath.getOrElseUpdate(path, attributed.data.contentHashStr)
@@ -197,7 +199,13 @@ object SbtMcpPlugin extends AutoPlugin {
 
     val entries = classpath.keysIterator.toList
     val fingerprint = classpath.iterator.map { case (path, hash) => s"$path\u0000$hash" }.toVector
-    SymbolIndexState.update(extracted.currentRef.project, entries, fingerprint, targetScalaVersion)
+    SymbolIndexState.update(
+      extracted.currentRef.project,
+      entries,
+      fingerprint,
+      targetScalaVersion,
+      searchEntries.toList,
+    )
   }
 
   /** Current project followed by all of its transitive aggregates, once each. */

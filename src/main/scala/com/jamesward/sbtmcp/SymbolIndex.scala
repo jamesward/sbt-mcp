@@ -25,6 +25,7 @@ object SymbolIndexState {
 
   private final case class Entry(
       entries: List[Path],
+      searchEntries: List[Path],
       fingerprint: Vector[String],
       targetScalaVersion: String,
       session: Option[IsolatedSymbolIndex.Session],
@@ -43,14 +44,23 @@ object SymbolIndexState {
       entries: List[Path],
       fingerprint: Vector[String],
       targetScalaVersion: String = scala.util.Properties.versionNumberString,
+      searchEntries: List[Path] = Nil,
   ): Unit = synchronized {
+    val effectiveSearchEntries = if searchEntries.nonEmpty then searchEntries else entries
     val previous = byProject.get.get(projectId)
     val keptSession = previous
-      .filter(entry => entry.fingerprint == fingerprint && entry.targetScalaVersion == targetScalaVersion)
+      .filter(entry =>
+        entry.fingerprint == fingerprint &&
+          entry.targetScalaVersion == targetScalaVersion &&
+          entry.searchEntries == effectiveSearchEntries
+      )
       .flatMap(_.session)
     if keptSession.isEmpty then previous.flatMap(_.session).foreach(_.close())
     byProject.set(
-      byProject.get.updated(projectId, Entry(entries, fingerprint, targetScalaVersion, keptSession))
+      byProject.get.updated(
+        projectId,
+        Entry(entries, effectiveSearchEntries, fingerprint, targetScalaVersion, keptSession),
+      )
     )
     active.set(Some(projectId))
   }
@@ -121,15 +131,15 @@ object SymbolIndexState {
       case Some(projectId) =>
         byProject.get.get(projectId) match {
           case None => Unavailable("symbol index is not ready")
-          case Some(Entry(_, _, _, Some(session))) => attempt(operation(session))
-          case Some(Entry(entries, fingerprint, targetScalaVersion, None)) if entries.nonEmpty =>
-            attempt(IsolatedSymbolIndex.open(entries, targetScalaVersion)) match {
+          case Some(Entry(_, _, _, _, Some(session))) => attempt(operation(session))
+          case Some(Entry(entries, searchEntries, fingerprint, targetScalaVersion, None)) if entries.nonEmpty =>
+            attempt(IsolatedSymbolIndex.open(entries, searchEntries, targetScalaVersion)) match {
               case Unavailable(message) => Unavailable(message)
               case Available(session) =>
                 byProject.set(
                   byProject.get.updated(
                     projectId,
-                    Entry(entries, fingerprint, targetScalaVersion, Some(session)),
+                    Entry(entries, searchEntries, fingerprint, targetScalaVersion, Some(session)),
                   )
                 )
                 attempt(operation(session))

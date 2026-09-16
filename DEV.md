@@ -61,7 +61,10 @@ classpath.
   enqueue an internal refresh onto the command loop (`SbtMcpPlugin.refreshFromState`
   runs `Compile/fullClasspathAsJars` for the current project and every transitive
   aggregate, deduplicates their classpaths, selects the highest aggregate Scala
-  version, then updates process-global `SymbolIndexState`). The first query lazily
+  version, then updates process-global `SymbolIndexState`). The full merged classpath
+  is retained only for type resolution and exact lookups; glob roots are the first
+  output jar from each active/aggregate project, preventing dependency-universe
+  traversal. The first query lazily
   creates a platform-parented `URLClassLoader` containing the plugin's index bridge,
   the matching tasty-query reader, and the project's `fullClasspathAsJars`. Only JDK
   types cross the reflective bridge, so a Scala 3.8 sbt plugin can safely run the

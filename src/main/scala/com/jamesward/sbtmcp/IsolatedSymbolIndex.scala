@@ -64,7 +64,7 @@ private[sbtmcp] object IsolatedSymbolIndex:
       }
   end Session
 
-  def open(entries: List[Path], targetScalaVersion: String): Session =
+  def open(entries: List[Path], searchEntries: List[Path], targetScalaVersion: String): Session =
     val readerUrl  = readerFor(targetScalaVersion)
     val runtimeUrls = matchingScalaRuntime(entries, targetScalaVersion).map(_.toUri.toURL)
     val urls = (symbolRuntimeUrl :: readerUrl :: (runtimeUrls ++ entries.map(_.toUri.toURL))).distinct.toArray
@@ -75,7 +75,7 @@ private[sbtmcp] object IsolatedSymbolIndex:
         val bridgeClass = Class.forName("com.jamesward.sbtmcp.IsolatedSymbolBridge$", true, loader)
         val bridge      = bridgeClass.getField("MODULE$").get(null)
         val methods     = bridgeClass.getMethods.iterator.map(method => method.getName -> method).toMap
-        val context = methods("create").invoke(bridge, entries.asJava).asInstanceOf[Object]
+        val context = methods("create").invoke(bridge, entries.asJava, searchEntries.asJava).asInstanceOf[Object]
         val version = methods("readerVersion").invoke(bridge).asInstanceOf[String]
         val runtimeVersion = methods("runtimeScalaVersion").invoke(bridge).asInstanceOf[String]
         Session(

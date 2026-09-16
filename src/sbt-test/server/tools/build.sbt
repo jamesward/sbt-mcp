@@ -37,6 +37,8 @@ TaskKey[Unit]("mcpCheckTools", "Verify the MCP server advertises tools and inspe
       thisProject.value.id,
       cp.map(a => converter.toPath(a.data)).toList,
       cp.map(_.data.contentHashStr).toVector,
+      scalaVersion.value,
+      cp.headOption.map(a => converter.toPath(a.data)).toList,
     )
   }
 

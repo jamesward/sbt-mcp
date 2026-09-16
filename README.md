@@ -74,6 +74,11 @@ stops its embedded server; keep a long-lived sbt session loaded while clients us
 
 - **Symbols refresh automatically.** `glob-search` / `inspect` / `symbol-location`
   bring the index up to date before each query — there's no manual refresh step.
+- **Glob search is project-scoped.** It enumerates symbols from the active project's
+  output and transitive aggregated subprojects, not every dependency jar. Dependencies
+  remain on the TASTy resolution classpath and can still be queried exactly with
+  `inspect` / `symbol-location`. Searches are additionally bounded by root, symbol,
+  result, and wall-clock budgets.
 - **List all symbols in a package.** To discover symbols (including newly-added
   ones) without knowing their names, call `glob-search` with `query:"*"` (or empty)
   and `inPackage` set, e.g. `{"query":"*","inPackage":"com.example"}`.

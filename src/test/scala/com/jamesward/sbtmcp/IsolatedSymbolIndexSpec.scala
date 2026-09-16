@@ -18,16 +18,25 @@ object IsolatedSymbolIndexSpec extends ZIOSpecDefault:
           codePath(classOf[scala.Option[?]]),
           codePath(classOf[scala.deriving.Mirror]),
         ).distinct
-        val session = IsolatedSymbolIndex.open(entries, "3.8.4")
+        val searchEntries = List(codePath(classOf[isolatedfixture.Probe]))
+        val session = IsolatedSymbolIndex.open(entries, searchEntries, "3.8.4")
         try
-          val hits    = session.globSearch("Probe", Some("isolatedfixture"), 100)
-          val inspect = session.inspect("isolatedfixture.Probe")
+          val hits              = session.globSearch("Probe", Some("isolatedfixture"), 100)
+          val limitedHits       = session.globSearch("*", Some("isolatedfixture"), 1)
+          val dependencyHits    = session.globSearch("Option", Some("scala"), 100)
+          val inspect           = session.inspect("isolatedfixture.Probe")
+          val dependencyInspect = session.inspect("scala.Option")
+          val dependencyLocation = session.location("scala.Option")
           assertTrue(
             session.isIsolated,
             session.readerVersion.startsWith("1.8"),
             session.runtimeScalaVersion.startsWith("3.8"),
             hits.exists(_.fqn.contains("isolatedfixture.Probe")),
+            limitedHits.size <= 1,
+            dependencyHits.isEmpty,
             inspect.exists(_.contains("ping")),
+            dependencyInspect.exists(_.contains("Option")),
+            dependencyLocation.nonEmpty,
           )
         finally session.close()
       }

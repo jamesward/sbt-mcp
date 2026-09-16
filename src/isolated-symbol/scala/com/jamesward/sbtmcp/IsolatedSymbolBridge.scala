@@ -6,6 +6,7 @@ import java.nio.file.{ FileSystems, Path }
 import scala.jdk.CollectionConverters.*
 import scala.util.control.NonFatal
 
+import tastyquery.Classpaths.ClasspathEntry
 import tastyquery.Contexts.Context
 
 /**
@@ -18,9 +19,14 @@ import tastyquery.Contexts.Context
  */
 object IsolatedSymbolBridge:
 
-  def create(entries: java.util.List[Path]): Object =
-    val classpath = LazyClasspath.read(entries.asScala.toList ++ jrtBase)
-    Context.initialize(classpath)
+  private final case class BridgeContext(context: Context, searchEntries: List[ClasspathEntry])
+
+  def create(entries: java.util.List[Path], searchEntries: java.util.List[Path]): Object =
+    val paths     = entries.asScala.toList
+    val classpath = LazyClasspath.read(paths ++ jrtBase)
+    val byPath    = paths.zip(classpath).toMap
+    val searchable = searchEntries.asScala.toList.flatMap(byPath.get)
+    BridgeContext(Context.initialize(classpath), searchable)
 
   /** Each result is encoded as `kind\u0000fully.qualified.Name`. */
   def globSearch(
@@ -29,20 +35,21 @@ object IsolatedSymbolBridge:
       inPackage: String,
       limit: Int,
   ): java.util.List[String] =
-    given Context = context.asInstanceOf[Context]
+    val bridgeContext = context.asInstanceOf[BridgeContext]
+    given Context = bridgeContext.context
     SymbolIndex
-      .globSearch(query, Option(inPackage), limit)
+      .globSearch(query, Option(inPackage), limit, bridgeContext.searchEntries)
       .map(hit => s"${hit.kind}\u0000${hit.fqn}")
       .asJava
 
   /** Returns null when the symbol cannot be found. */
   def inspect(context: Object, fqn: String): String =
-    given Context = context.asInstanceOf[Context]
+    given Context = context.asInstanceOf[BridgeContext].context
     SymbolIndex.inspect(fqn).orNull
 
   /** Returns null when no source position is available. */
   def location(context: Object, fqn: String): String =
-    given Context = context.asInstanceOf[Context]
+    given Context = context.asInstanceOf[BridgeContext].context
     SymbolIndex.location(fqn).orNull
 
   def runtimeScalaVersion(): String = scala.util.Properties.versionNumberString
