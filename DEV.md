@@ -9,10 +9,17 @@ For user-facing install/usage, see [README.md](README.md).
 sbt compile          # main sources; warnings are errors (-Werror)
 sbt Test/compile     # test sources (includes the standalone launcher)
 sbt scripted         # all scripted integration tests
+sbt 'scripted server/multi-module' # sbt 2.0 plugin indexing Scala 3.9 modules
 ```
 
-Pinned versions: sbt **2.0.6**, zio-http-mcp **0.5.3** (pulls zio 2.1.26 /
-zio-http 3.11.3 / zio-schema 1.8.6), tasty-query **1.8.0**, Scala **3.8.4**.
+Runtime dependencies: zio-http-mcp **0.7.0** (zio 2.1.26 / zio-http
+3.11.4 / zio-schema 1.8.6) is compiled in the Scala 3.9
+`isolatedMcpRuntime` project and embedded with its full dependency closure. None of
+those jars appear on the published plugin's production dependency classpath. Symbol
+indexing is also fully isolated: a Scala 3.8 `isolatedSymbolRuntime` jar plus
+tasty-query **1.8.0** and **1.9.0** reader jars are embedded resources. No
+tasty-query classes or dependencies appear on the published plugin's production
+classpath.
 
 ## Architecture
 
@@ -26,6 +33,14 @@ zio-http 3.11.3 / zio-schema 1.8.6), tasty-query **1.8.0**, Scala **3.8.4**.
     is truthy or Heroku provides a nonblank `SOURCE_VERSION` during its build;
   - the server handle is a process-global `AtomicReference` guarded by an atomic
     compare-and-set, so even a repeated `onLoad` (e.g. `reload`) can't bind the
+
+- **MCP/ZIO dependencies are classloader-isolated.** `McpServerRuntime` in the
+  plugin is a JDK-only facade. It extracts a nested Scala 3.9 runtime containing
+  `McpServerRuntimeImpl`, zio-http-mcp 0.7.0, ZIO HTTP, Netty, and their dependency
+  closure, then launches it in a platform-parented `URLClassLoader`. Commands,
+  refreshes, task lists, and symbol operations cross through `IsolatedMcpBridge`
+  using only `java.util.function` interfaces, strings, and opaque handles. Closing
+  the server closes the child loader and deletes its extracted jars.
     port twice.
 
 - **`sbt-task` runs on sbt's command loop, in-process.** The plugin registers an
@@ -45,16 +60,19 @@ zio-http 3.11.3 / zio-schema 1.8.6), tasty-query **1.8.0**, Scala **3.8.4**.
   `inspect` / `symbol-location` run on zio-http threads. Before each query they
   enqueue an internal refresh onto the command loop (`SbtMcpPlugin.refreshFromState`
   runs `Compile/fullClasspathAsJars` for the current project and every transitive
-  aggregate, deduplicates their classpaths, then updates the process-global
-  `SymbolIndexState`), from which the tools lazily build a cached
-  [`tasty-query`](https://github.com/scalacenter/tasty-query) `Context` (plus the
-  JRE's `java.base`). Properties:
+  aggregate, deduplicates their classpaths, selects the highest aggregate Scala
+  version, then updates process-global `SymbolIndexState`). The first query lazily
+  creates a platform-parented `URLClassLoader` containing the plugin's index bridge,
+  the matching tasty-query reader, and the project's `fullClasspathAsJars`. Only JDK
+  types cross the reflective bridge, so a Scala 3.8 sbt plugin can safely run the
+  Scala 3.9 reader with the project's Scala 3.9 runtime. Properties:
   - serialized with any `~` watch (runs between triggers);
   - **skipped when the loop is busy** (e.g. the call originates inside another
     command) to avoid a deadlock — the current index is used instead;
-  - **cheap when nothing changed**: `SymbolIndexState` caches the `Context` by a
-    content fingerprint (the classpath jars' content hashes) and rebuilds only after
-    a recompile;
+  - **cheap when nothing changed**: `SymbolIndexState` caches the isolated session
+    by classpath content fingerprint and target Scala version, rebuilding and closing
+    the old classloader only after a recompile or version change;
+  - classloaders are closed on invalidation and sbt unload/reload;
   - if the refresh compile **fails**, the tools answer from the last good index and
     append a `(note: the project does not currently compile …)` line.
 
@@ -66,7 +84,7 @@ zio-http 3.11.3 / zio-schema 1.8.6), tasty-query **1.8.0**, Scala **3.8.4**.
   State captured on load — no command executed. Per-task detail (`task` arg) runs
   `help <task>` via `sbt-task`.
 
-- **Documentation tools are proxied.** `McpServerRuntime.ProxyToolSource` implements
+- **Documentation tools are proxied.** `McpServerRuntimeImpl.ProxyToolSource` implements
   zio-http-mcp's `McpToolSource`: its `listTools` connects to the upstream MCP server
   (`mcpDocsUrl`, default javadocs.dev) and merges those tools into `tools/list`, and
   its `callTool` forwards any name not matched by a built-in tool. It connects per
@@ -80,9 +98,9 @@ zio-http 3.11.3 / zio-schema 1.8.6), tasty-query **1.8.0**, Scala **3.8.4**.
 | Concern | Where |
 |---------|-------|
 | Plugin, lifecycle, command registration, refresh orchestration | `SbtMcpPlugin` |
-| MCP server + tool definitions (zio-http-mcp) | `McpServerRuntime` |
+| Isolated MCP server facade / child implementation | `McpServerRuntime`; `McpServerRuntimeImpl`, `IsolatedMcpBridge` under `src/isolated-runtime` |
 | In-process command execution / output capture / failure detection | `sbt.McpInProcess` (package `sbt`) |
-| tasty-query index + glob-search / inspect / location | `SymbolIndex`, `SymbolIndexState` |
+| tasty-query isolation + index + symbol operations | Parent: `IsolatedSymbolIndex`, `SymbolIndexState`; embedded `src/isolated-symbol`: `IsolatedSymbolBridge`, `LazyClasspath`, `SymbolIndex` |
 
 `sbt.McpInProcess` lives in `package sbt` to reach the internals sbt exposes for
 running against a captured `State` (`Command.process`, `StandardMain.exchange`,
@@ -138,7 +156,7 @@ Under `src/sbt-test/server/`, run with `sbt scripted` or `sbt 'scripted server/<
   clean **success**, and that failures are reported as `[error]` (not `[ok]`).
 - **`incremental-symbols`** — lists all symbols in a package (`glob-search "*"`), adds
   a new source, re-indexes, and asserts the new symbol appears (verifying refresh
-  invalidates the cached tasty-query context).
+  invalidates the cached isolated reader session).
 - **`symbol-location`** — asserts `symbol-location` returns a symbol's `path:line`.
 - **`refresh-error`** — asserts the refresh fails on a non-compiling project (what
   makes the tools surface the stale-index note).
@@ -148,8 +166,10 @@ Under `src/sbt-test/server/`, run with `sbt scripted` or `sbt 'scripted server/<
 - **`multi-protocol`** — verifies the five built-ins plus a proxied local tool are
   listed under every zio-http-mcp protocol revision (modern `2026-07-28` and all
   legacy Streamable HTTP revisions).
-- **`multi-module`** — verifies `mcpStatus` does not aggregate across subprojects,
-  so one build-global server produces one status line.
+- **`multi-module`** — under sbt 2.0, compiles a Toolbook-shaped aggregate on
+  Scala 3.9 (shared-module `dependsOn`, empty-package symbols), asserts the isolated
+  reader is tasty-query 1.9, and verifies real `glob-search` / `inspect` calls see
+  submodule symbols. Also verifies `mcpStatus` does not aggregate across projects.
 - **`ci-disable`** — verifies `mcpDisableInCI` defaults to true and, when the scripted
   suite runs under CI or with Heroku's `SOURCE_VERSION`, proves an enabled server did
   not bind its configured port.

@@ -54,9 +54,10 @@ object McpInProcess {
     val logFile = state.globalLogging.backing.file
     val start   = if (logFile.isFile) logFile.length else 0L
     var parseError: Option[String] = None
-    val (afterState, threw): (State, Option[String]) =
+    val processed: (State, Option[String]) =
       try (Command.process(commandLine, state, m => parseError = Some(m)), None)
       catch { case NonFatal(e) => (state, Some(Option(e.getMessage).getOrElse(e.toString))) }
+    val (afterState, threw) = processed
     val captured = readDelta(logFile, start)
     // A failing command/task does NOT throw out of Command.process. sbt records the
     // failure in the State instead, two ways depending on whether an `onFailure`

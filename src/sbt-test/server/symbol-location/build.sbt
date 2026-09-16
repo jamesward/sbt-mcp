@@ -4,16 +4,11 @@ lazy val root = (project in file("."))
 
 // Validate we can get the source location (path:line) of a symbol.
 commands += Command.command("checkSymbolLocation") { state =>
-  import com.jamesward.sbtmcp.{ SymbolIndex, SymbolIndexState }
+  import com.jamesward.sbtmcp.SymbolIndexState
 
   com.jamesward.sbtmcp.SbtMcpPlugin.refreshFromState(state)
 
-  val loc: Option[String] = SymbolIndexState.context match {
-    case Some(ctx0) =>
-      given tastyquery.Contexts.Context = ctx0
-      SymbolIndex.location("example.Located")
-    case None => None
-  }
+  val loc = SymbolIndexState.location("example.Located")
 
   assert(loc.isDefined, "expected a source location for example.Located")
   val l = loc.get

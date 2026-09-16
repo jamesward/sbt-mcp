@@ -15,8 +15,8 @@ lazy val root = (project in file("."))
 // Integration check: connect to the embedded MCP server (started on load because
 // mcpEnabled := true), assert the expected tools are advertised, and that a real
 // `inspect` call reads this project's TASTy. Uses the plugin's own transitive
-// deps (zio-http-mcp client, zio, zio-http, zio-json), which are on the build's
-// classpath via the plugin.
+// client deps (zio-http-mcp, zio, zio-http, zio-json), supplied explicitly
+// in project/plugins.sbt so the published plugin can keep its runtime isolated.
 TaskKey[Unit]("mcpCheckTools", "Verify the MCP server advertises tools and inspect works") := Def.uncached {
   import com.jamesward.ziohttp.mcp.*
   import com.jamesward.ziohttp.mcp.client.McpClient

@@ -90,6 +90,7 @@ object McpServerRuntimeSpec extends ZIOSpecDefault:
         port   <- freePort
         handle <- startServer(port)
         result <- (for
+                    _ <- ZIO.attempt(assert(handle.isIsolated, "MCP runtime must use a platform-parented classloader"))
                     _ <- awaitListening(port)
                     _ <- closeWithin(handle)
                     _ <- closeWithin(handle)

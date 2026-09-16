@@ -4,17 +4,12 @@ lazy val root = (project in file("."))
 
 // Get symbols, add a new symbol, get symbols again — the new symbol must appear.
 commands += Command.command("checkIncrementalSymbols") { state =>
-  import com.jamesward.sbtmcp.{ SymbolIndex, SymbolIndexState }
+  import com.jamesward.sbtmcp.SymbolIndexState
 
   // List ALL symbols in `example` (wildcard) — the same "list the project symbols" flow an agent uses.
   def listExampleSymbols(): List[String] = {
     com.jamesward.sbtmcp.SbtMcpPlugin.refreshFromState(state)
-    SymbolIndexState.context match {
-      case Some(ctx0) =>
-        given tastyquery.Contexts.Context = ctx0
-        SymbolIndex.globSearch("*", Some("example")).map(_.fqn)
-      case None => Nil
-    }
+    SymbolIndexState.globSearch("*", Some("example")).getOrElse(Nil).map(_.fqn)
   }
 
   // 1) initial listing — the base symbol is present, NewThing is not

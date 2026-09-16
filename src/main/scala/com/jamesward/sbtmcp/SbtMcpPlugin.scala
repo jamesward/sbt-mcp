@@ -17,10 +17,11 @@ import scala.concurrent.duration.*
  *   - `glob-search`: search Scala 3 symbols by name (tasty-query backed)
  *   - `inspect`    : list a symbol's members/signatures (tasty-query backed)
  *
- * STUB STATUS: this is a scaffold. It is pinned to zio-http-mcp 0.5.3 /
- * tasty-query 1.8.0 / sbt 2.0.6 and encodes the intended architecture, but the
- * exact library call sites should be validated by a compile (some tasty-query
- * flag/signature rendering is intentionally simplified — see [[SymbolIndex]]).
+ * STUB STATUS: this is a scaffold. It is pinned to zio-http-mcp 0.7.0 /
+ * an isolated symbol runtime with tasty-query 1.8.0 / 1.9.0 readers, and
+ * encodes the intended architecture; exact library call sites should be validated
+ * by a compile (some tasty-query flag/signature rendering is intentionally
+ * simplified — see the isolated symbol runtime sources).
  *
  * ==Single server in a multi-module build==
  * sbt runs ONE server JVM per build, shared by every subproject and every
@@ -177,7 +178,15 @@ object SbtMcpPlugin extends AutoPlugin {
     val classpath = scala.collection.mutable.LinkedHashMap.empty[java.nio.file.Path, String]
     var taskState = state
 
-    aggregateProjectRefs(extracted).foreach { ref =>
+    val refs = aggregateProjectRefs(extracted)
+    val targetScalaVersion = refs
+      .map(ref => extracted.get(ref / scalaVersion))
+      .maxBy { version =>
+        val numbers = version.split("[.-]").iterator.take(3).map(_.toIntOption.getOrElse(0)).toVector.padTo(3, 0)
+        (numbers(0), numbers(1), numbers(2))
+      }
+
+    refs.foreach { ref =>
       val (nextState, cp) = extracted.runTask(ref / Compile / fullClasspathAsJars, taskState)
       taskState = nextState
       cp.foreach { attributed =>
@@ -188,7 +197,7 @@ object SbtMcpPlugin extends AutoPlugin {
 
     val entries = classpath.keysIterator.toList
     val fingerprint = classpath.iterator.map { case (path, hash) => s"$path\u0000$hash" }.toVector
-    SymbolIndexState.update(extracted.currentRef.project, entries, fingerprint)
+    SymbolIndexState.update(extracted.currentRef.project, entries, fingerprint, targetScalaVersion)
   }
 
   /** Current project followed by all of its transitive aggregates, once each. */
@@ -408,6 +417,7 @@ object SbtMcpPlugin extends AutoPlugin {
       catch { case scala.util.control.NonFatal(_) => () }
       log.info("sbt-mcp: MCP server stopped")
     }
+    SymbolIndexState.shutdown()
 
   /**
    * Enumerate the build's task/setting keys with their descriptions, read directly

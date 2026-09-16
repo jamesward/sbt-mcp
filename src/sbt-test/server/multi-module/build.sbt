@@ -1,7 +1,9 @@
-// A multi-module build: an aggregating root plus three subprojects, all with the
-// plugin auto-triggered. Regression coverage for the single build-wide server and
-// for root-active symbol indexing across direct and transitive aggregates.
-ThisBuild / scalaVersion := "3.8.4"
+// A Toolbook-shaped multi-module build: an aggregating root, application
+// subprojects that depend on a shared module, Scala 3.9 project code, and most
+// symbols in the empty package. It also retains a transitive aggregate edge so
+// both traversal shapes are covered while the plugin itself remains on sbt 2.0's
+// Scala 3.8 runtime.
+ThisBuild / scalaVersion := "3.9.0"
 
 Global / mcpEnabled := true
 // This fixture intentionally exercises the server even when scripted runs in CI.
@@ -14,11 +16,16 @@ Global / mcpDocsUrl := None
 lazy val b = (project in file("b"))
 lazy val a = (project in file("a"))
   .aggregate(b)
+  .dependsOn(b)
 lazy val c = (project in file("c"))
+  .dependsOn(b)
 
 lazy val root = (project in file("."))
-  .aggregate(a, c)
-  .settings(name := "multi-module-test")
+  .aggregate(a, b, c)
+  .settings(
+    name := "multi-module-test",
+    scalaVersion := "3.8.4",
+  )
 
 // Verify the fix that prevents duplicated status output: `mcpStatus` must not
 // aggregate, so invoking it on the root runs it in a single (root) scope and prints
@@ -61,14 +68,11 @@ commands += Command.command("checkMultiModuleSymbols") { state =>
           client <- McpClient.connect(url)
           glob <- client.callTool(
             "glob-search",
-            Json.Obj(
-              "query"     -> Json.Str("AlphaService"),
-              "inPackage" -> Json.Str("modulea"),
-            ),
+            Json.Obj("query" -> Json.Str("AlphaService")),
           )
           inspect <- client.callTool(
             "inspect",
-            Json.Obj("symbol" -> Json.Str("moduleb.BetaService")),
+            Json.Obj("symbol" -> Json.Str("BetaService")),
           )
         } yield (textOf(glob), textOf(inspect))
       }
@@ -79,8 +83,13 @@ commands += Command.command("checkMultiModuleSymbols") { state =>
       Runtime.default.unsafe.run(program.provide(Client.default)).getOrThrow()
     }
 
+  val readerVersion  = com.jamesward.sbtmcp.SymbolIndexState.activeReaderVersion
+  val runtimeVersion = com.jamesward.sbtmcp.SymbolIndexState.activeRuntimeScalaVersion
+  assert(readerVersion.exists(_.startsWith("1.9")), s"Scala 3.9 project must use isolated TASTy Query 1.9, got: $readerVersion")
+  assert(runtimeVersion.exists(_.startsWith("3.9")), s"isolated reader must use the Scala 3.9 project runtime, got: $runtimeVersion")
+
   assert(
-    globOut.contains("modulea.AlphaService") && inspectOut.contains("betaOnly"),
+    globOut.contains("AlphaService") && inspectOut.contains("betaOnly"),
     s"""symbol tools must include aggregated subprojects when root is active:
        |glob-search output:
        |$globOut
