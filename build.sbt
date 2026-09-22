@@ -48,7 +48,7 @@ lazy val isolatedSymbolRuntime = (project in file("isolated-symbol-runtime"))
     Compile / unmanagedSourceDirectories += (root / baseDirectory).value / "src" / "isolated-symbol" / "scala",
     Test / unmanagedSourceDirectories += (root / baseDirectory).value / "src" / "isolated-symbol-test" / "scala",
     libraryDependencies ++= Seq(
-      "ch.epfl.scala" %% "tasty-query"  % "1.8.0",
+      "ch.epfl.scala" %% "tasty-query"  % "1.9.0",
       "dev.zio"       %% "zio-test"     % "2.1.26" % Test,
       "dev.zio"       %% "zio-test-sbt" % "2.1.26" % Test,
     ),
