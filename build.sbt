@@ -147,7 +147,7 @@ root / libraryDependencies ++= Seq(
 // sibling source project through `evalTestDeps` above.
 root / libraryDependencies ++= {
   if (useLocalZioEvals) Seq.empty
-  else Seq("com.jamesward" %% "zio-evals" % "0.0.2" % Test)
+  else Seq("com.jamesward" %% "zio-evals" % "0.1.1" % Test)
 }
 
 scriptedLaunchOpts ++= Seq(
