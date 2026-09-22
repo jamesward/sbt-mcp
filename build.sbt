@@ -35,7 +35,7 @@ lazy val isolatedMcpRuntime = (project in file("isolated-runtime"))
     publish / skip := true,
     scalaVersion := "3.9.0",
     Compile / unmanagedSourceDirectories += (root / baseDirectory).value / "src" / "isolated-runtime" / "scala",
-    libraryDependencies += "com.jamesward" %% "zio-http-mcp" % "0.7.0",
+    libraryDependencies += "com.jamesward" %% "zio-http-mcp" % "0.8.2",
   )
 
 
@@ -138,7 +138,7 @@ root / Compile / resourceGenerators += Def.task {
 }.taskValue
 
 root / libraryDependencies ++= Seq(
-  "com.jamesward" %% "zio-http-mcp" % "0.5.3" % Test,
+  "com.jamesward" %% "zio-http-mcp" % "0.8.2" % Test,
   "dev.zio"       %% "zio-test"     % "2.1.26" % Test,
   "dev.zio"       %% "zio-test-sbt" % "2.1.26" % Test,
 )
