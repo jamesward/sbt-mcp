@@ -17,7 +17,7 @@ import scala.concurrent.duration.*
  *   - `glob-search`: search Scala 3 symbols by name (tasty-query backed)
  *   - `inspect`    : list a symbol's members/signatures (tasty-query backed)
  *
- * STUB STATUS: this is a scaffold. It is pinned to zio-http-mcp 0.7.0 /
+ * STUB STATUS: this is a scaffold. Its isolated runtime uses zio-http-mcp 0.8.2 /
  * an isolated symbol runtime with tasty-query 1.8.0 / 1.9.0 readers, and
  * encodes the intended architecture; exact library call sites should be validated
  * by a compile (some tasty-query flag/signature rendering is intentionally

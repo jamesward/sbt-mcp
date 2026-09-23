@@ -1,22 +1,7 @@
-// Pass `-Dlocal` to sbt to substitute the released zio-evals dependency with
-// the sibling checkout at `../zio-evals` for co-development. The dependency is
-// TEST-scoped (`test->compile`) because only the eval integration test uses it;
-// zio-evals never enters the published sbt plugin.
-val useLocalSubprojects = sys.props.get("local").isDefined
-val zioEvalsDir         = file("../zio-evals")
-val useLocalZioEvals    = useLocalSubprojects && zioEvalsDir.exists()
-val evalTestDeps: Seq[ClasspathDep[ProjectReference]] =
-  if (useLocalZioEvals)
-    Seq(RootProject(zioEvalsDir) % "test->compile")
-  else
-    Seq.empty
-
-// A minimal root project is kept only for the structural bits that cannot be
-// expressed as top-level settings: enabling SbtPlugin and the `-Dlocal`
-// zio-evals project dependency. All ordinary settings are flat, below.
+// The published sbt plugin itself remains on sbt 2.0's Scala 3.8 runtime.
+// Scala 3.9-only dependencies and their tests live in isolated subprojects.
 lazy val root = (project in file("."))
   .enablePlugins(SbtPlugin)
-  .dependsOn(evalTestDeps *)
 
 // Dependency-only project: its resolved TASTy Query 1.9 jar is embedded into
 // the plugin, but none of its Scala 3.9 classes enter the plugin classpath.
@@ -28,16 +13,15 @@ lazy val tastyQuery39Assets = (project in file("reader-assets"))
   )
 
 // The MCP/ZIO runtime is isolated from sbt's Scala 3.8 classloader. It compiles
-// with Scala 3.9 against zio-http-mcp 0.7.0 and is embedded with its full runtime
+// with Scala 3.9 against zio-http-mcp 0.8.2 and is embedded with its full runtime
 // dependency closure; only a JDK callback bridge is visible to the sbt plugin.
 lazy val isolatedMcpRuntime = (project in file("isolated-runtime"))
   .settings(
     publish / skip := true,
     scalaVersion := "3.9.0",
     Compile / unmanagedSourceDirectories += (root / baseDirectory).value / "src" / "isolated-runtime" / "scala",
-    libraryDependencies += "com.jamesward" %% "zio-http-mcp" % "0.7.0",
+    libraryDependencies += "com.jamesward" %% "zio-http-mcp" % "0.8.2",
   )
-
 
 // TASTy-linked symbol implementation. Its classes and TASTy Query 1.8 are
 // embedded resources and never enter the sbt plugin's production classpath.
@@ -53,6 +37,24 @@ lazy val isolatedSymbolRuntime = (project in file("isolated-symbol-runtime"))
       "dev.zio"       %% "zio-test-sbt" % "2.1.26" % Test,
     ),
   )
+
+// Tests that directly consume current Scala 3.9 libraries cannot compile in the
+// sbt plugin's Scala 3.8 project. Keep them in a Scala 3.9 project that depends on
+// the plugin's production classes (3.9 can read their older 3.8 TASTy).
+lazy val latestDependencyTests = (project in file("latest-tests"))
+  .dependsOn(root)
+  .settings(
+    publish / skip := true,
+    name := "sbt-mcp-latest-dependency-tests",
+    scalaVersion := "3.9.0",
+    libraryDependencies ++= Seq(
+      "com.jamesward" %% "zio-http-mcp" % "0.8.2"  % Test,
+      "com.jamesward" %% "zio-evals"    % "0.1.2"  % Test,
+      "dev.zio"       %% "zio-test"     % "2.1.26" % Test,
+      "dev.zio"       %% "zio-test-sbt" % "2.1.26" % Test,
+    ),
+  )
+
 organization := "com.jamesward"
 name         := "sbt-mcp"
 homepage     := Some(uri("https://github.com/jamesward/sbt-mcp"))
@@ -69,7 +71,6 @@ tastyQuery39Assets / name := "sbt-mcp-tasty-query-assets"
 isolatedMcpRuntime / name := "sbt-mcp-isolated-runtime"
 isolatedSymbolRuntime / name := "sbt-mcp-isolated-symbol-runtime"
 versionScheme := Some("semver-spec")
-
 
 // Generate the runtime MCP identity from the same sbt `version` used to publish
 // the plugin, avoiding a second hard-coded implementation version.
@@ -138,17 +139,9 @@ root / Compile / resourceGenerators += Def.task {
 }.taskValue
 
 root / libraryDependencies ++= Seq(
-  "com.jamesward" %% "zio-http-mcp" % "0.5.3" % Test,
-  "dev.zio"       %% "zio-test"     % "2.1.26" % Test,
-  "dev.zio"       %% "zio-test-sbt" % "2.1.26" % Test,
+  "dev.zio" %% "zio-test"     % "2.1.26" % Test,
+  "dev.zio" %% "zio-test-sbt" % "2.1.26" % Test,
 )
-
-// Normal builds use the Maven Central release; `-Dlocal` substitutes the
-// sibling source project through `evalTestDeps` above.
-root / libraryDependencies ++= {
-  if (useLocalZioEvals) Seq.empty
-  else Seq("com.jamesward" %% "zio-evals" % "0.0.2" % Test)
-}
 
 scriptedLaunchOpts ++= Seq(
   s"-Dplugin.version=${version.value}",

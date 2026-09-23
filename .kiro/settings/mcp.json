@@ -3,7 +3,10 @@
     "sbt-mcp": {
       "url": "http://127.0.0.1:5010/",
       "timeout": 1800000,
-      "disabled": false
+      "disabled": true
+    },
+    "javadocs": {
+      "url": "https://javadocs.dev/mcp"
     }
   }
 }

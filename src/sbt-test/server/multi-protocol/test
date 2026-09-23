@@ -1,5 +1,4 @@
-# Validate that our MCP server lists ALL tools — built-ins plus proxied upstream tools —
-# under EVERY supported MCP protocol version (modern 2026-07-28 stateless and the legacy
-# handshake revisions). Guards against a proxied-tool merge regressing on one protocol path.
+# Validate built-in and proxied tools under every supported MCP protocol using
+# a forked Scala 3.9 zio-http-mcp 0.8.2 client and local upstream server.
 > compile
-> mcpCheckProtocols
+> harness/run

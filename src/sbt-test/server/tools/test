@@ -1,8 +1,9 @@
-# Verify the MCP server advertises the tools and that `inspect` / `glob-search`
-# read this project's symbols (the index refreshes automatically; mcpCheckTools
-# also seeds it since the loop is busy during the task).
+# Compile and seed the index while the root project is active, then query the
+# server from the forked Scala 3.9 zio-http-mcp 0.8.2 harness.
 > compile
 > mcpStatus
-> mcpCheckTools
+> mcpPrepareTools
+> harness/run
+
 # Verify the in-process command primitive that sbt-task uses.
 > mcpInJvmCheck

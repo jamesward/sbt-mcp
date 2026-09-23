@@ -1,11 +1,10 @@
-# Multi-module build: the single, process-global MCP server must report its status
-# once — not once per aggregated subproject. `mcpStatus` on the root should print a
-# single "running at ..." line. checkStatusNoAggregate asserts the mechanism
-# (mcpStatus/aggregate = false) that guarantees this.
+# The single process-global MCP server must report status once, not once per
+# aggregated subproject.
 > mcpStatus
 > checkStatusNoAggregate
 
-# Compile all aggregated modules, then query through the real MCP handlers while
-# the root is active. Both module-only symbols should be visible from the root.
+# Compile the aggregate and seed its Scala 3.9 symbol index, then query it from
+# the forked zio-http-mcp 0.8.2 harness.
 > compile
-> checkMultiModuleSymbols
+> prepareMultiModuleSymbols
+> harness/run

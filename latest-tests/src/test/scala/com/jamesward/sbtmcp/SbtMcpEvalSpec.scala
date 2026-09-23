@@ -97,29 +97,39 @@ object SbtMcpEvalSpec extends ZIOSpecDefault:
       case _ => false
     }
 
-  // Kiro's headless output is rendered terminal text rather than structured
-  // TranscriptEvents. Normalize ANSI controls, then classify its explicit
-  // "Running tool ..." blocks. Keep shell analysis scoped to execute_bash blocks
-  // so an answer merely mentioning `./sbt` does not become a false positive.
+  // Kiro 0.1.2 emits ACP JSON lines; older versions rendered terminal-oriented
+  // "Running tool ..." blocks. Support both. For ACP shell calls, classify only
+  // lines whose Kiro metadata identifies a shell tool, so answer text that merely
+  // mentions `./sbt` cannot become a false positive.
   private val ansiControl = "\u001B\\[[0-?]*[ -/]*[@-~]".r
-  private val kiroMcpCall = """(?i)Running tool sbt-task\b[^\n]*from mcp server:\s*sbtmcp""".r
-  private val kiroShellBlock =
+  private val kiroLegacyMcpCall = """(?i)Running tool sbt-task\b[^\n]*from mcp server:\s*sbtmcp""".r
+  private val kiroLegacyShellBlock =
     """(?is)Running tool (?:execute_bash|shell|bash)\b(.*?)(?=\n\s*-\s*(?:Completed|Failed)|\z)""".r
+  private val kiroAcpMcpCall =
+    "(?i)\"toolName\"\\s*:\\s*\"sbt-task\"\\s*,\\s*\"mcpServerName\"\\s*:\\s*\"sbtmcp\"".r
+  private val kiroAcpShellCall =
+    "(?i)\"toolName\"\\s*:\\s*\"(?:execute_bash|shell|bash)\"".r
 
   private def stripAnsi(text: String): String =
     ansiControl.replaceAllIn(text, "").replace("\r", "")
 
   private def kiroUsedMcpTool(output: String): Boolean =
-    kiroMcpCall.findFirstIn(stripAnsi(output)).isDefined
+    val clean = stripAnsi(output)
+    kiroLegacyMcpCall.findFirstIn(clean).isDefined ||
+      clean.linesIterator.exists(line => kiroAcpMcpCall.findFirstIn(line).isDefined)
 
   private def kiroShelledOutToSbt(output: String): Boolean =
-    kiroShellBlock
-      .findAllMatchIn(stripAnsi(output))
-      .exists(m => sbtCliInvocation.findFirstIn(m.group(1)).isDefined)
+    val clean = stripAnsi(output)
+    kiroLegacyShellBlock
+      .findAllMatchIn(clean)
+      .exists(m => sbtCliInvocation.findFirstIn(m.group(1)).isDefined) ||
+      clean.linesIterator.exists { line =>
+        kiroAcpShellCall.findFirstIn(line).isDefined && sbtCliInvocation.findFirstIn(line).isDefined
+      }
 
   /**
    * Run kiro-cli with a temporary agent exposing both its shell and sbt-mcp.
-   * KiroCliAgentLoop 0.0.2 supplies the corrected MCP server grant in `tools`;
+   * KiroCliAgentLoop 0.1.2 supplies the corrected MCP server grant in `tools`;
    * this harness adds `execute_bash` so Kiro faces the same real choice as Claude.
    */
   private def runKiroToolChoiceEval(task: String): Task[TestResult] =
@@ -225,12 +235,22 @@ object SbtMcpEvalSpec extends ZIOSpecDefault:
         """Running tool execute_bash with the param
           | ⋮  {"command":"./sbt test > /tmp/failures.log 2>&1"}
           | - Completed in 2.0s""".stripMargin
+      val acpMcp =
+        """{"type":"sessionUpdate","data":{"update":{"sessionUpdate":"tool_call","rawInput":{"command":"test"},"_meta":{"kiro":{"toolName":"sbt-task","mcpServerName":"sbtmcp"}}}}}"""
+      val acpBenignShell =
+        """{"type":"sessionUpdate","data":{"update":{"sessionUpdate":"tool_call","rawInput":{"command":"grep -n sbt build.sbt"},"_meta":{"kiro":{"toolName":"execute_bash"}}}}}"""
+      val acpSbtShell =
+        """{"type":"sessionUpdate","data":{"update":{"sessionUpdate":"tool_call","rawInput":{"command":"./sbt test"},"_meta":{"kiro":{"toolName":"execute_bash"}}}}}"""
 
       assertTrue(
         kiroUsedMcpTool(mcp),
+        kiroUsedMcpTool(acpMcp),
         !kiroShelledOutToSbt(mcp),
+        !kiroShelledOutToSbt(acpMcp),
         !kiroShelledOutToSbt(benignShell),
+        !kiroShelledOutToSbt(acpBenignShell),
         kiroShelledOutToSbt(sbtShell),
+        kiroShelledOutToSbt(acpSbtShell),
       )
     },
     test("Claude compile prompt uses the sbt-mcp tool, not the sbt CLI") {
