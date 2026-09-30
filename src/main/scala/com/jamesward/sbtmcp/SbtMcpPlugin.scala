@@ -22,7 +22,7 @@ import scala.jdk.OptionConverters.*
  *   - `symbol-location`: a symbol's source location (tasty-query backed)
  *   - `check`      : fast compile-free type check with the project's own compiler
  *
- * STUB STATUS: this is a scaffold. Its isolated runtime uses zio-http-mcp 0.8.2 /
+ * STUB STATUS: this is a scaffold. Its isolated runtime uses zio-http-mcp 0.8.3 /
  * an isolated symbol runtime with tasty-query 1.8.0 / 1.9.0 readers, and
  * encodes the intended architecture; exact library call sites should be validated
  * by a compile (some tasty-query flag/signature rendering is intentionally

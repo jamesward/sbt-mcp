@@ -30,7 +30,7 @@ lazy val harness = (project in file("harness"))
   .settings(
     publish / skip := true,
     Compile / run / fork := true,
-    libraryDependencies += "com.jamesward" %% "zio-http-mcp" % "0.8.2",
+    libraryDependencies += "com.jamesward" %% "zio-http-mcp" % "0.8.3",
   )
 
 // ---- helpers ----------------------------------------------------------------

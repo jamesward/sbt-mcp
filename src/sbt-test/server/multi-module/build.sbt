@@ -32,7 +32,7 @@ lazy val harness = (project in file("harness"))
     publish / skip := true,
     scalaVersion := "3.9.0",
     Compile / run / fork := true,
-    libraryDependencies += "com.jamesward" %% "zio-http-mcp" % "0.8.2",
+    libraryDependencies += "com.jamesward" %% "zio-http-mcp" % "0.8.3",
   )
 
 TaskKey[Unit]("checkStatusNoAggregate", "Assert mcpStatus does not aggregate across modules") := {
@@ -48,7 +48,7 @@ TaskKey[Unit]("checkStatusNoAggregate", "Assert mcpStatus does not aggregate acr
 }
 
 // Seed the process-global index while the aggregating root is active. The forked
-// harness performs the HTTP assertions afterward with zio-http-mcp 0.8.2.
+// harness performs the HTTP assertions afterward with zio-http-mcp 0.8.3.
 commands += Command.command("prepareMultiModuleSymbols") { state =>
   com.jamesward.sbtmcp.SbtMcpPlugin.refreshFromState(state)
   val readerVersion  = com.jamesward.sbtmcp.SymbolIndexState.activeReaderVersion

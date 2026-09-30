@@ -20,5 +20,5 @@ lazy val harness = (project in file("harness"))
     publish / skip := true,
     scalaVersion := "3.9.0",
     Compile / run / fork := true,
-    libraryDependencies += "com.jamesward" %% "zio-http-mcp" % "0.8.2",
+    libraryDependencies += "com.jamesward" %% "zio-http-mcp" % "0.8.3",
   )

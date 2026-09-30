@@ -32,7 +32,12 @@ import java.net.ServerSocket
  *      `kiro-cli chat` call. It runs whenever kiro-cli is installed + authenticated
  *      and is marked ignored otherwise (this is NOT cost-based gating). kiro-cli is
  *      asked to call the proxied `get_latest_version` tool; a version string can only
- *      come back if kiro-cli received the tool and invoked it through sbt-mcp.
+ *      come back if kiro-cli received the tool and invoked it through sbt-mcp. The
+ *      call and its result are asserted from kiro-cli's stream-json transcript
+ *      (`result.events`), since the answer carries only the final text.
+ *
+ *   3. [[kiro-cli /tools lists proxied javadocs.dev tools]] — kiro-cli v2 reports only
+ *      a tool count, so it is compared against sbt-mcp's own `tools/list` size.
  */
 object SbtMcpKiroDocsSpec extends ZIOSpecDefault:
 
@@ -120,17 +125,23 @@ object SbtMcpKiroDocsSpec extends ZIOSpecDefault:
       withServer(Some(DocsUrl)) { ourUrl =>
         val agent = KiroCliAgentLoop(runTimeout = 60.seconds)
         for
+          // What sbt-mcp actually serves (built-ins + merged javadocs.dev tools).
+          served <- listToolsLikeKiro(ourUrl).map(_._2)
           result <- agent.run(
                       "/tools",
                       modelId   = "",
                       mcpServers = List(McpServerConfig("sbtmcp", ourUrl)),
                       policy    = AgentPolicy.default,
                     )
-          answer  = result.answer
-          _      <- ZIO.logInfo(s"SbtMcpKiroDocsSpec: kiro-cli /tools output=$answer")
+          answer  = stripAnsi(result.answer)
+          _      <- ZIO.logInfo(s"SbtMcpKiroDocsSpec: kiro-cli /tools output=$answer served=${served.size}")
+          // kiro-cli v2 (stream-json) reports only a count, e.g. "14 tools available".
+          // The eval agent is granted only `@sbtmcp`, so that count must equal
+          // everything sbt-mcp serves — which only holds if the proxied tools reached kiro-cli.
+          reported = """(\d+) tools? available""".r.findFirstMatchIn(answer).map(_.group(1).toInt)
         yield assertTrue(
-          answer.contains("sbt-task"),
-          answer.contains("get_latest_version"),
+          served.size > builtIns.size,
+          reported.contains(served.size),
         )
       }
     } @@ CliTestGates.ifKiroAvailable,
@@ -149,13 +160,17 @@ object SbtMcpKiroDocsSpec extends ZIOSpecDefault:
                       mcpServers = List(McpServerConfig("sbtmcp", ourUrl)),
                       policy    = AgentPolicy.default,
                     )
-          clean   = stripAnsi(result.answer)
-          _      <- ZIO.logInfo(s"SbtMcpKiroDocsSpec: kiro-cli answer=$clean")
+          clean   = stripAnsi(result.answer).trim
+          _      <- ZIO.logInfo(s"SbtMcpKiroDocsSpec: kiro-cli answer=$clean events=${result.events}")
+          // Tool calls/results come from kiro-cli's stream-json transcript, not the answer text.
+          isDocsTool = (name: String) => name.endsWith("get_latest_version")
+          results    = result.events.collect {
+                         case TranscriptEvent.ToolResult(name, text, isError) if isDocsTool(name) => (text, isError)
+                       }
         yield assertTrue(
-          clean.contains("get_latest_version"),
-          clean.contains("from mcp server: sbtmcp"),
-          clean.matches("""(?s).*?>\s+\d+\.\d+\.\d+(?:[-+][^\s]+)?.*"""),
-          !clean.contains("I don't have access to an sbtmcp MCP server"),
+          result.capturedToolCalls.exists(c => isDocsTool(c.name) && c.input.contains("zio_3")),
+          results.exists { case (text, isError) => !isError && text.contains(clean) },
+          clean.matches("""\d+\.\d+\.\d+(?:[-+]\S+)?"""),
         )
       }
     } @@ CliTestGates.ifKiroAvailable,

@@ -14,8 +14,8 @@ sbt scripted         # all scripted integration tests
 sbt 'scripted server/multi-module' # sbt 2.0 plugin indexing Scala 3.9 modules
 ```
 
-Runtime dependencies: zio-http-mcp **0.8.2** (zio 2.1.26 / zio-http
-3.11.4 / zio-schema 1.8.6) is compiled in the Scala 3.9
+Runtime dependencies: zio-http-mcp **0.8.3** (zio 2.1.26 / zio-http
+3.11.6 / zio-schema 1.9.0) is compiled in the Scala 3.9
 `isolatedMcpRuntime` project and embedded with its full dependency closure. None of
 those jars appear on the published plugin's production dependency classpath. Symbol
 indexing is also fully isolated: a Scala 3.8 `isolatedSymbolRuntime` jar plus
@@ -24,9 +24,9 @@ tasty-query classes or dependencies appear on the published plugin's production
 classpath.
 
 Tests that directly consume current Scala 3.9 artifacts live in
-`latestDependencyTests`: it uses zio-http-mcp **0.8.2** and zio-evals **0.1.2**.
+`latestDependencyTests`: it uses zio-http-mcp **0.8.3** and zio-evals **0.1.2**.
 Scripted MCP client checks likewise run in forked Scala 3.9 fixture subprojects
-using zio-http-mcp **0.8.2**, keeping those APIs out of sbt's Scala 3.8
+using zio-http-mcp **0.8.3**, keeping those APIs out of sbt's Scala 3.8
 meta-build classloader.
 
 ## Architecture
@@ -44,7 +44,7 @@ meta-build classloader.
 
 - **MCP/ZIO dependencies are classloader-isolated.** `McpServerRuntime` in the
   plugin is a JDK-only facade. It extracts a nested Scala 3.9 runtime containing
-  `McpServerRuntimeImpl`, zio-http-mcp 0.8.2, ZIO HTTP, Netty, and their dependency
+  `McpServerRuntimeImpl`, zio-http-mcp 0.8.3, ZIO HTTP, Netty, and their dependency
   closure, then launches it in a platform-parented `URLClassLoader`. Commands,
   refreshes, task lists, and symbol operations cross through `IsolatedMcpBridge`
   using only `java.util.function` interfaces, strings, and opaque handles. Closing

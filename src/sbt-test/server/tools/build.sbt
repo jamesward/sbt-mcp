@@ -17,7 +17,7 @@ lazy val harness = (project in file("harness"))
     scalaVersion := "3.9.0",
     Compile / run / fork := true,
     Compile / run / javaOptions += s"-Dplugin.version=${sys.props("plugin.version")}",
-    libraryDependencies += "com.jamesward" %% "zio-http-mcp" % "0.8.2",
+    libraryDependencies += "com.jamesward" %% "zio-http-mcp" % "0.8.3",
   )
 
 // The command loop is busy while the forked harness runs, so prepare the symbol

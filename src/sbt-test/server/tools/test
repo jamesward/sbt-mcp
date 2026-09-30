@@ -1,5 +1,5 @@
 # Compile and seed the index while the root project is active, then query the
-# server from the forked Scala 3.9 zio-http-mcp 0.8.2 harness.
+# server from the forked Scala 3.9 zio-http-mcp 0.8.3 harness.
 > compile
 > mcpStatus
 > mcpPrepareTools

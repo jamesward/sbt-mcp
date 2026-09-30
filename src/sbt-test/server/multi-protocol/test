@@ -1,4 +1,4 @@
 # Validate built-in and proxied tools under every supported MCP protocol using
-# a forked Scala 3.9 zio-http-mcp 0.8.2 client and local upstream server.
+# a forked Scala 3.9 zio-http-mcp 0.8.3 client and local upstream server.
 > compile
 > harness/run
