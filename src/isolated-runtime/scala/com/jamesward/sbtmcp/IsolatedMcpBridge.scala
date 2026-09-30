@@ -17,6 +17,7 @@ object IsolatedMcpBridge:
       globSearch: BiFunction[String, String, String],
       inspectSymbol: Function[String, String],
       locateSymbol: Function[String, String],
+      check: Function[java.util.List[String], String],
       docsUrl: String,
   ): Object =
     try StartResult(McpServerRuntimeImpl.start(
@@ -32,6 +33,10 @@ object IsolatedMcpBridge:
       (query, inPackage) => globSearch.apply(query, inPackage.orNull),
       symbol => inspectSymbol.apply(symbol),
       symbol => locateSymbol.apply(symbol),
+      (files, content, scope) =>
+        check.apply(
+          (scope.getOrElse("") :: (if content.isDefined then "1" else "0") :: content.getOrElse("") :: files).asJava
+        ),
       Option(docsUrl),
     ), null)
     catch

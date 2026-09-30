@@ -52,6 +52,9 @@ object McpServerRuntimeImpl {
   final case class ListTasksArgs(all: Boolean = false, task: Option[String] = None)
   object ListTasksArgs { given Schema[ListTasksArgs] = DeriveSchema.gen[ListTasksArgs] }
 
+  final case class CheckArgs(files: List[String], content: Option[String] = None, scope: Option[String] = None)
+  object CheckArgs { given Schema[CheckArgs] = DeriveSchema.gen[CheckArgs] }
+
   def start(
       host: String,
       port: Int,
@@ -62,6 +65,7 @@ object McpServerRuntimeImpl {
       globSearch: (String, Option[String]) => String,
       inspectSymbol: String => String,
       locateSymbol: String => String,
+      check: (List[String], Option[String], Option[String]) => String,
       docsUrl: Option[String],
   ): Handle = {
     // sbt 2.0.x puts slf4j-api 1.7.x in a parent classloader without a binding.
@@ -79,7 +83,8 @@ object McpServerRuntimeImpl {
       McpServer("sbt-mcp", implementationVersion)
         .instructions(
           "Tools for driving a Scala/sbt build: run sbt tasks, and search/inspect Scala 3 " +
-            "symbols read from TASTy. The symbol index refreshes automatically before each query. " +
+            "symbols read from TASTy, and `check` Scala 3 sources quickly without compiling. " +
+            "The symbol index refreshes automatically before each query. " +
             "Documentation tools are proxied from javadocs.dev."
         )
         .tool(sbtTaskTool(runCommand))
@@ -87,6 +92,7 @@ object McpServerRuntimeImpl {
         .tool(globSearchTool(refresh, globSearch))
         .tool(inspectTool(refresh, inspectSymbol))
         .tool(locationTool(refresh, locateSymbol))
+        .tool(checkTool(check))
     // Proxy an upstream MCP server (javadocs.dev by default): its tools are merged
     // into tools/list, and any tools/call not matching our built-ins is forwarded.
     val withProxy: McpServer[Client] = docsUrl.filter(_.trim.nonEmpty) match {
@@ -292,6 +298,31 @@ object McpServerRuntimeImpl {
           val body = locateSymbol(args.symbol)
           withNote(body, note)
         }
+      }
+
+  private def checkTool(check: (List[String], Option[String], Option[String]) => String): McpToolHandler =
+    McpTool("check")
+      .description(
+        "Fast syntax + type check of Scala 3 source files WITHOUT compiling (no bytecode, no " +
+          "incremental-compile bookkeeping, does not wait behind a running build or `~` watch). Runs " +
+          "the project's own Scala compiler, warm and in-process, through every checking phase " +
+          "(parser, typer, macro/inline expansion, override/abstract-member checks, pattern-match " +
+          "exhaustivity, unused warnings) with the module's classpath and scalacOptions. Use it after " +
+          "each edit for IDE-speed feedback; run `sbt-task` `compile`/`test` before finishing.\n" +
+          "Parameters:\n" +
+          "  - files (string list): source paths, absolute or relative to the build root. All must belong " +
+          "to the same module (project + Compile/Test).\n" +
+          "  - content (string, optional): unsaved content to check instead of the file on disk (exactly " +
+          "one file).\n" +
+          "  - scope (optional): \"files\" (default) checks the given files plus any sources of the module " +
+          "changed since its last compile; \"module\" re-checks every source of the module (finds breakage " +
+          "in files that USE a changed API).\n" +
+          "Returns `[ok]`/`[error]`, error/warning counts, and diagnostics as `path:line:column: severity: " +
+          "message`. Other modules are seen as of their last compile."
+      )
+      .annotations(readOnly = OptBool.True)
+      .handle[Any, Throwable, CheckArgs, String] { (args: CheckArgs) =>
+        ZIO.attemptBlocking(check(args.files, args.content, args.scope))
       }
 
   /** Append an optional warning note (e.g. the project doesn't compile) to a tool result. */

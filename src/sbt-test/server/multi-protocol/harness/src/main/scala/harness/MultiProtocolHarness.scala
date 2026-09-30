@@ -7,7 +7,7 @@ import zio.*
 import zio.http.*
 
 object MultiProtocolHarness:
-  private val builtIns = Set("sbt-task", "list-tasks", "glob-search", "inspect", "symbol-location")
+  private val builtIns = Set("sbt-task", "list-tasks", "glob-search", "inspect", "symbol-location", "check")
   private val proxied  = "docs-echo"
 
   def main(args: Array[String]): Unit =

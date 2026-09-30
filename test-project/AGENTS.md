@@ -7,6 +7,11 @@
   unavailable, state that clearly and use a direct CLI fallback only when
   necessary. Separate multiple sbt commands with `;`.
 
+- After editing Scala 3 sources, validate them with the `check` tool of
+  `sbt-mcp-test-project` (pass the edited files; it is a fast, compile-free type
+  check). Use `"scope":"module"` after changing an API. Run `compile`/`test`
+  through `sbt-task` before declaring the work done.
+
 - Use `sbt-mcp-test-project` for Scala/classpath symbol work: `glob-search` to
   find/list symbols, `inspect` for members/signatures, and `symbol-location`
   for source locations. Prefer these over text search, dependency-jar
