@@ -1,0 +1,19 @@
+# Baseline compile of the Scala 3 modules (legacy is Scala 2 and only used for refusal).
+> core/compile
+> macros/compile
+> app/compile
+> app/Test/compile
+
+> checkDependsOnAndMacros
+> checkTestConfiguration
+> checkChangedSiblings
+> checkModuleScope
+> checkInvalidation
+> checkUpstream
+> checkRefusals
+> checkRendering
+> checkPerformance
+
+# The MCP tool over HTTP, answered while the command loop is busy.
+> checkPrimeForHarness
+> harness/run

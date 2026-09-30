@@ -38,6 +38,18 @@ lazy val isolatedSymbolRuntime = (project in file("isolated-symbol-runtime"))
     ),
   )
 
+// Fast-check compiler bridge. Compiled once against the OLDEST supported compiler
+// (Scala 3.3.1, Provided: never embedded) and linked at runtime against the TARGET
+// project's own scala3-compiler jars from its `scalaInstance`, in an isolated
+// classloader. Compiling against the minimum keeps it from linking to newer APIs.
+lazy val isolatedCheckRuntime = (project in file("isolated-check-runtime"))
+  .settings(
+    publish / skip := true,
+    scalaVersion := "3.3.1",
+    Compile / unmanagedSourceDirectories += (root / baseDirectory).value / "src" / "isolated-check" / "scala",
+    libraryDependencies += "org.scala-lang" %% "scala3-compiler" % scalaVersion.value % Provided,
+  )
+
 // Tests that directly consume current Scala 3.9 libraries cannot compile in the
 // sbt plugin's Scala 3.8 project. Keep them in a Scala 3.9 project that depends on
 // the plugin's production classes (3.9 can read their older 3.8 TASTy).
@@ -70,6 +82,7 @@ developers := List(
 tastyQuery39Assets / name := "sbt-mcp-tasty-query-assets"
 isolatedMcpRuntime / name := "sbt-mcp-isolated-runtime"
 isolatedSymbolRuntime / name := "sbt-mcp-isolated-symbol-runtime"
+isolatedCheckRuntime / name := "sbt-mcp-isolated-check-runtime"
 versionScheme := Some("semver-spec")
 
 // Generate the runtime MCP identity from the same sbt `version` used to publish
@@ -136,6 +149,14 @@ root / Compile / resourceGenerators += Def.task {
   IO.copyFile(runtimeJar, runtimeOutput)
   IO.copyFile(readerJar, readerOutput)
   Seq(runtimeOutput, readerOutput)
+}.taskValue
+
+root / Compile / resourceGenerators += Def.task {
+  val converter  = fileConverter.value
+  val runtimeJar = converter.toPath((isolatedCheckRuntime / Compile / packageBin).value).toFile
+  val output     = (Compile / resourceManaged).value / "sbt-mcp-check" / "check-runtime.jar"
+  IO.copyFile(runtimeJar, output)
+  Seq(output)
 }.taskValue
 
 root / libraryDependencies ++= Seq(

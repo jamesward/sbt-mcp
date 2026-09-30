@@ -8,14 +8,19 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.atomic.{ AtomicBoolean, AtomicReference }
 import scala.concurrent.{ Await, Promise, TimeoutException }
 import scala.concurrent.duration.*
+import scala.jdk.CollectionConverters.*
+import scala.jdk.OptionConverters.*
 
 /**
  * sbt-mcp — an opt-in (default OFF) MCP server embedded in the sbt JVM.
  *
- * It exposes three tools over MCP (see [[McpServerRuntime]]):
+ * It exposes these tools over MCP (see [[McpServerRuntime]]):
  *   - `sbt-task`   : run an sbt command/task in the running sbt server
+ *   - `list-tasks` : list the build's tasks/settings
  *   - `glob-search`: search Scala 3 symbols by name (tasty-query backed)
  *   - `inspect`    : list a symbol's members/signatures (tasty-query backed)
+ *   - `symbol-location`: a symbol's source location (tasty-query backed)
+ *   - `check`      : fast compile-free type check with the project's own compiler
  *
  * STUB STATUS: this is a scaffold. Its isolated runtime uses zio-http-mcp 0.8.2 /
  * an isolated symbol runtime with tasty-query 1.8.0 / 1.9.0 readers, and
@@ -80,6 +85,16 @@ object SbtMcpPlugin extends AutoPlugin {
   private val pendingRefresh = new ConcurrentHashMap[String, Promise[Option[String]]]()
   private final val RefreshCmd = "mcpRefreshIndexInternal"
 
+  // In-flight `check` module-configuration refreshes, keyed by execId. The loop-side
+  // command computes the module's classpath/options/sources and completes the promise.
+  private val pendingCheckConfig =
+    new ConcurrentHashMap[String, (ProjectRef, Configuration, Promise[Either[String, ModuleCheck.ModuleConfig]])]()
+  private final val CheckConfigCmd = "mcpCheckConfigInternal"
+
+  // Last computed configuration per (project id, configuration name), used when the
+  // command loop is busy (e.g. mid-compile) so `check` never has to wait behind it.
+  private val checkConfigs = new ConcurrentHashMap[(String, String), ModuleCheck.ModuleConfig]()
+
   // Kept as named values so the generated client configuration and the server-side
   // wait can be compared directly in fast regression tests.
   private[sbtmcp] final val CommandWait              = 30.minutes
@@ -96,6 +111,8 @@ object SbtMcpPlugin extends AutoPlugin {
     commands += mcpExecCommand,
     // `mcpRefreshIndexInternal <id>` recomputes the symbol index on the loop.
     commands += mcpRefreshCommand,
+    // `mcpCheckConfigInternal <id>` computes a module's `check` configuration on the loop.
+    commands += mcpCheckConfigCommand,
     onLoad := { (s: State) =>
       val s1 = onLoad.value(s) // run the previously-registered onLoad first
       currentState.set(Some(s1))
@@ -104,6 +121,7 @@ object SbtMcpPlugin extends AutoPlugin {
     },
     onUnload := { (s: State) =>
       stopServer(s.log)
+      checkConfigs.clear()
       currentState.set(None)
       onUnload.value(s)
     },
@@ -239,6 +257,252 @@ object SbtMcpPlugin extends AutoPlugin {
       catch { case _: TimeoutException => pendingRefresh.remove(id); None }
   }
 
+  // ---------------------------------------------------------------------------
+  // `check`: fast compile-free validation of Scala 3 sources
+  // ---------------------------------------------------------------------------
+
+  /** Command that computes one module's `check` configuration ON the command loop. */
+  private def mcpCheckConfigCommand: Command =
+    Command.single(CheckConfigCmd) { (state, id) =>
+      Option(pendingCheckConfig.remove(id)).foreach { case (ref, configuration, promise) =>
+        val result =
+          try Right(checkConfigFromState(state, ref, configuration))
+          catch { case scala.util.control.NonFatal(e) => Left(Option(e.getMessage).getOrElse(e.toString)) }
+        promise.trySuccess(result)
+      }
+      state
+    }
+
+  /**
+   * Compute everything `check` needs for `ref / configuration`. MUST run on the
+   * command loop (it evaluates tasks). Upstream modules are compiled if needed (via
+   * `dependencyClasspath`) so their latest API is visible; the module itself is NOT
+   * compiled: its last compiled classes are used, and its changed sources are
+   * re-checked from source (see [[ModuleCheck.changedSources]]).
+   */
+  def checkConfigFromState(state: State, ref: ProjectRef, configuration: Configuration): ModuleCheck.ModuleConfig = {
+    val extracted = Project.extract(state)
+    val converter = extracted.get(fileConverter)
+    var taskState = state
+    def run[A](key: TaskKey[A]): A =
+      try {
+        val (next, value) = extracted.runTask(key, taskState)
+        taskState = next
+        value
+      } catch {
+        case scala.util.control.NonFatal(e) =>
+          throw new RuntimeException(s"${ref.project}/${configuration.name}/${key.key.label} failed: ${rootCause(e)}", e)
+      }
+
+    val scope         = ref / configuration
+    val version       = extracted.get(scope / scalaVersion)
+    val compilerJars  = run(scope / scalaInstance).allJars.toList.map(_.toPath)
+    val options       = run(scope / scalacOptions).toList
+    val ownClasses    = extracted.get(scope / classDirectory).toPath
+    val (dependencies, notes) =
+      try (run(scope / dependencyClasspath).map(a => converter.toPath(a.data)).toList, Nil)
+      catch {
+        case scala.util.control.NonFatal(_) =>
+          // An upstream module does not compile: fall back to its last compiled classes.
+          val external = run(scope / externalDependencyClasspath).map(a => converter.toPath(a.data)).toList
+          val upstream = extracted.get(buildDependencies).classpathTransitiveRefs(ref)
+          val ownMain  = if (configuration == Test) List(extracted.get(ref / Compile / classDirectory).toPath) else Nil
+          val upstreamClasses = upstream.map(r => extracted.get(r / Compile / classDirectory).toPath).toList
+          (
+            ownMain ++ upstreamClasses ++ external,
+            List("an upstream module does not currently compile; checked against its last compiled classes"),
+          )
+      }
+    val sourceFiles = run(scope / sources).map(_.toPath.toAbsolutePath.normalize).toList
+    // `previousCompile` depends on upstream compilation in sbt 2, so it fails while an
+    // upstream module is broken: keep the stamps from the last refresh, or (none yet)
+    // treat every source as changed, which is correct, only slower.
+    val recorded =
+      try
+        run(scope / previousCompile).analysis.toScala.map { analysis =>
+          analysis.readStamps.getAllSourceStamps.asScala.iterator.map { case (file, stamp) =>
+            converter.toPath(file).toAbsolutePath.normalize -> stamp.writeStamp
+          }.toMap
+        }
+      catch {
+        case scala.util.control.NonFatal(_) =>
+          Option(checkConfigs.get((ref.project, configuration.name))).flatMap(_.recordedStamps)
+      }
+    val module = ModuleCheck.ModuleConfig(
+      projectId = ref.project,
+      configuration = configuration.name,
+      scalaVersion = version,
+      compilerJars = compilerJars,
+      classpath = (ownClasses :: dependencies).distinct,
+      scalacOptions = options,
+      sources = sourceFiles,
+      recordedStamps = recorded,
+      currentStamp = currentSourceStamp,
+      notes = notes,
+    )
+    checkConfigs.put((ref.project, configuration.name), module)
+    module
+  }
+
+  /** The most specific message of a (possibly `Incomplete`) task failure. */
+  private def rootCause(error: Throwable): String = {
+    val causes = error match {
+      case incomplete: Incomplete => Incomplete.allExceptions(incomplete).toList
+      case other                  => List(other)
+    }
+    causes
+      .map(e => Iterator.iterate[Throwable](e)(_.getCause).takeWhile(_ != null).toList.last)
+      .map(e => Option(e.getMessage).filter(_.nonEmpty).getOrElse(e.getClass.getName))
+      .distinct
+      .mkString("; ")
+  }
+
+  /** A source's current Zinc stamp, in the same kind as the recorded `previous` one. */
+  private def currentSourceStamp(path: java.nio.file.Path, previous: String): Option[String] =
+    if (previous.startsWith("farm(")) Some(sbt.internal.inc.Stamper.forFarmHashP(path).writeStamp)
+    else if (previous.startsWith("lastModified(")) Some(sbt.internal.inc.Stamper.forLastModifiedP(path).writeStamp)
+    else if (previous.startsWith("hash("))
+      Some(sbt.internal.inc.Stamper.forContentHash(sbt.internal.inc.PlainVirtualFile(path)).writeStamp)
+    else None
+
+  /**
+   * The (project, configuration) whose source directories contain `path`, by the
+   * most specific directory. Settings only, so it is safe off the command loop.
+   */
+  private[sbtmcp] def ownerOf(extracted: Extracted, path: java.nio.file.Path): Option[(ProjectRef, Configuration)] = {
+    val candidates = for {
+      ref           <- extracted.structure.allProjectRefs
+      configuration <- List(Compile, Test)
+      directories = extracted.getOpt(ref / configuration / unmanagedSourceDirectories).getOrElse(Nil) ++
+        extracted.getOpt(ref / configuration / managedSourceDirectories).getOrElse(Nil)
+      directory <- directories.map(_.toPath.toAbsolutePath.normalize)
+      if path.startsWith(directory)
+    } yield (directory.getNameCount, ref, configuration)
+    candidates.sortBy(-_._1).headOption.map { case (_, ref, configuration) => (ref, configuration) }
+  }
+
+  /** The build root: relative `check` paths resolve against it and output is shown relative to it. */
+  private def buildRoot(extracted: Extracted): java.nio.file.Path =
+    java.nio.file.Paths.get(extracted.structure.root).toAbsolutePath.normalize
+
+  /**
+   * Validate and resolve a `check` request. `configFor` supplies the module
+   * configuration (computed on the loop, or from the cache).
+   */
+  private[sbtmcp] def checkRequest(
+      state: State,
+      files: List[String],
+      content: Option[String],
+      scope: Option[String],
+      configFor: (ProjectRef, Configuration) => Either[String, ModuleCheck.ModuleConfig],
+  ): Either[String, ModuleCheck.Result] = {
+    val extracted = Project.extract(state)
+    val root      = buildRoot(extracted)
+    val paths     = files.map(_.trim).filter(_.nonEmpty).map(f => root.resolve(f).toAbsolutePath.normalize).distinct
+    for {
+      parsedScope <- ModuleCheck.Scope.parse(scope)
+      _ <- Either.cond(paths.nonEmpty, (), "check: provide at least one file in `files`")
+      _ <- Either.cond(content.isEmpty || paths.size == 1, (), "check: `content` can only be used with exactly one file")
+      _ <- paths.find(p => !p.toString.endsWith(".scala")).map(p => s"check: only .scala files can be checked: $p").toLeft(())
+      _ <- (if (content.isEmpty) paths.find(p => !java.nio.file.Files.isRegularFile(p)) else None)
+             .map(p => s"check: file not found: $p").toLeft(())
+      owners = paths.map(p => p -> ownerOf(extracted, p))
+      _ <- owners.collectFirst { case (p, None) => s"check: $p is not in a source directory of any project" }.toLeft(())
+      distinct = owners.flatMap(_._2).distinct
+      _ <- Either.cond(
+             distinct.size == 1,
+             (),
+             "check: files belong to different modules (" +
+               distinct.map { case (r, c) => s"${r.project}/${c.name}" }.mkString(", ") +
+               "); check each module separately",
+           )
+      (ref, configuration) = distinct.head
+      version = extracted.get(ref / configuration / scalaVersion)
+      _ <- Either.cond(isSupportedScala(version), (), s"check: ${ref.project} uses Scala $version; check supports Scala 3.3 and later")
+      config <- configFor(ref, configuration)
+      overlays = content.map(text => Map(paths.head -> text)).getOrElse(Map.empty)
+      checked <-
+        try Right(ModuleCheck.check(config, paths, overlays, parsedScope))
+        catch { case scala.util.control.NonFatal(e) => Left(s"check: compiler failed: ${Option(e.getMessage).getOrElse(e.toString)}") }
+    } yield checked
+  }
+
+  private def renderCheck(state: State, result: Either[String, ModuleCheck.Result]): String =
+    result.map(r => ModuleCheck.render(r, buildRoot(Project.extract(state)))).merge
+
+  private[sbtmcp] def isSupportedScala(version: String): Boolean = {
+    val parts = version.split("[.-]")
+    (parts.headOption.flatMap(_.toIntOption), parts.lift(1).flatMap(_.toIntOption)) match {
+      case (Some(3), Some(minor)) => minor >= 3
+      case (Some(major), _)       => major > 3
+      case _                      => false
+    }
+  }
+
+  /**
+   * Run a `check` request ON the command loop (e.g. from a build's own command);
+   * the module configuration is computed directly.
+   */
+  def checkOnLoop(state: State, files: List[String], content: Option[String] = None, scope: Option[String] = None): String =
+    renderCheck(state, checkResultOnLoop(state, files, content, scope))
+
+  /** Structured form of [[checkOnLoop]]: the diagnostics, or a request error. */
+  def checkResultOnLoop(
+      state: State,
+      files: List[String],
+      content: Option[String] = None,
+      scope: Option[String] = None,
+  ): Either[String, ModuleCheck.Result] =
+    checkRequest(
+      state,
+      files,
+      content,
+      scope,
+      (ref, configuration) =>
+        try Right(checkConfigFromState(state, ref, configuration))
+        catch { case scala.util.control.NonFatal(e) => Left(s"check: could not load module settings: ${e.getMessage}") },
+    )
+
+  /**
+   * The `check` tool entry point (MCP handler threads). The compiler runs here, off
+   * the command loop. The module configuration is refreshed on the loop when it is
+   * idle; while it is busy (a compile or `~` watch is running), the last computed
+   * configuration is used so a check never queues behind a build.
+   */
+  private def runCheck(files: List[String], content: Option[String], scope: Option[String]): String =
+    currentState.get match {
+      case None => "check: build not loaded yet"
+      case Some(state) =>
+        renderCheck(state, checkRequest(state, files, content, scope, (ref, configuration) => {
+          val cached = Option(checkConfigs.get((ref.project, configuration.name)))
+          cached match {
+            case Some(config) if sbt.McpInProcess.isBusy =>
+              Right(config.copy(notes = config.notes :+ "sbt is busy; used the module settings from its last refresh"))
+            case _ =>
+              refreshCheckConfig(ref, configuration) match {
+                case Right(config) => Right(config)
+                case Left(error)   => cached.toRight(error)
+              }
+          }
+        }))
+    }
+
+  private def refreshCheckConfig(ref: ProjectRef, configuration: Configuration): Either[String, ModuleCheck.ModuleConfig] = {
+    val id      = "mcp-check-" + UUID.randomUUID().toString
+    val promise = Promise[Either[String, ModuleCheck.ModuleConfig]]()
+    pendingCheckConfig.put(id, (ref, configuration, promise))
+    if (!sbt.McpInProcess.enqueue(s"$CheckConfigCmd $id", id)) {
+      pendingCheckConfig.remove(id)
+      Left("check: no sbt channel available yet (is an sbt session attached?)")
+    } else
+      try Await.result(promise.future, CommandWait)
+      catch {
+        case _: TimeoutException =>
+          pendingCheckConfig.remove(id)
+          Left("check: timed out waiting for sbt to load the module settings")
+      }
+  }
+
   override lazy val projectSettings: Seq[Setting[?]] = Seq(
     // Opt out of sbt 2.x action caching: this task has side effects / reads
     // process-global state, so a cached (skipped) re-run would print nothing.
@@ -303,7 +567,15 @@ object SbtMcpPlugin extends AutoPlugin {
         val host   = extracted.getOpt(mcpHost).getOrElse("127.0.0.1")
         val port   = extracted.getOpt(mcpPort).getOrElse(5010)
         val docsUrl = extracted.getOpt(mcpDocsUrl).flatten
-        val handle = McpServerRuntime.start(host, port, runCommand, () => refreshIndex(), () => taskInfos(currentState.get), docsUrl)
+        val handle = McpServerRuntime.start(
+          host,
+          port,
+          runCommand,
+          () => refreshIndex(),
+          () => taskInfos(currentState.get),
+          docsUrl,
+          (files, content, scope) => runCheck(files, content, scope),
+        )
         serverHandle.set(Some(handle))
         state.log.info(
           s"""sbt-mcp: MCP server started at http://$host:$port/
@@ -408,6 +680,11 @@ object SbtMcpPlugin extends AutoPlugin {
         |  unavailable, state that clearly and use a direct CLI fallback only when
         |  necessary. Separate multiple sbt commands with `;`.
         |
+        |- After editing Scala 3 sources, validate them with the `check` tool of
+        |  `$serverName` (pass the edited files; it is a fast, compile-free type
+        |  check). Use `"scope":"module"` after changing an API. Run `compile`/`test`
+        |  through `sbt-task` before declaring the work done.
+        |
         |- Use `$serverName` for Scala/classpath symbol work: `glob-search` to
         |  find/list symbols, `inspect` for members/signatures, and `symbol-location`
         |  for source locations. Prefer these over text search, dependency-jar
@@ -426,6 +703,7 @@ object SbtMcpPlugin extends AutoPlugin {
       log.info("sbt-mcp: MCP server stopped")
     }
     SymbolIndexState.shutdown()
+    ModuleCheck.shutdown()
 
   /**
    * Enumerate the build's task/setting keys with their descriptions, read directly

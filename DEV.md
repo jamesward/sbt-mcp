@@ -104,6 +104,53 @@ meta-build classloader.
   This keeps us from maintaining javadocs.dev's tool set. Set `mcpDocsUrl := None` to
   disable (and avoid the outbound network call).
 
+- **`check` is a warm, compile-free checker using the project's own compiler.**
+  `IsolatedCheckBridge` (under `src/isolated-check`) is compiled once against the
+  oldest supported compiler (Scala 3.3.1, `Provided`) and embedded as a jar. At
+  runtime `IsolatedCheck` loads it in a platform-parented `URLClassLoader` together
+  with the module's `scalaInstance.allJars`, so each module is checked by exactly the
+  compiler version that compiles it; the project classpath is passed as `-classpath`
+  (macros load through the compiler's own macro classloader, as in a batch compile).
+  The bridge only touches the long-stable driver surface (`Driver.setup`,
+  `Compiler.newRun`, `Run.compileSources`, `StoreReporter`, `SourceFile.virtual`).
+  - **Phases:** the full `Compiler` pipeline with `-Ystop-before:genBCode`, so every
+    diagnostic a compile can produce short of bytecode emission is reported
+    (typer, PostTyper, inlining/macros, RefChecks, init checks, pattern matching,
+    unused checks, erasure clashes, `@tailrec`). Output goes to a private scratch
+    directory; options that write elsewhere or rewrite sources (`-d`, `-rewrite`,
+    `-Xsemanticdb`, `-Ypickle-write`, …) are dropped (`IsolatedCheck.sanitizeOptions`).
+  - **Reporter parity with sbt:** `UniqueMessagePositions` + `HideNonSensicalMessages`
+    (what zinc's `DelegatingReporter` inherits), positions via `pos.nonInlined`, and
+    `-explain` text appended — so a check reports the same diagnostics, at the same
+    line/column, as `compile`.
+  - **Fresh context, warm compiler:** every check builds a new root compiler context
+    (non-interactive, byte-for-byte batch-compiler behavior), so nothing from one
+    check (e.g. an unsaved overlay's definitions) can leak into the next, and a
+    compile's new classes are always seen. What is kept warm is the classloader per
+    compiler version (`ModuleCheck` caches up to 4, LRU): the JIT-compiled compiler and
+    its cached classpath archives. Reusing one symbol table across checks in
+    `Mode.Interactive` (as the REPL / IDE presentation compiler do) was measured about
+    1.5x faster but was rejected: symbols entered from source survive into later runs,
+    and the interactive parser is more lenient (e.g. a trailing infix operator), both
+    of which break parity with `compile`.
+  - **Measured** (`zz`-style bench on a ZIO module, JIT warm): full-fidelity check of
+    one file ~280-450 ms vs ~550-1000 ms for sbt's incremental compile of the same edit;
+    typer-only (`-Dsbt.mcp.check.stopBefore=posttyper`) ~200 ms fresh / ~80 ms with a
+    reused context. The phases from inlining to erasure are most of the difference.
+    The first check after sbt starts pays ~3 s to load and JIT the compiler.
+  - **Module settings** (`checkConfigFromState`, on the command loop via the
+    internal `mcpCheckConfigInternal` command): `scalaInstance`, `scalacOptions`,
+    `sources`, `classDirectory` + `dependencyClasspath` (which compiles upstream
+    modules if needed; if one fails, the upstream class directories + external
+    classpath are used with a note), and the last compile's Zinc source stamps
+    (`previousCompile`). When the loop is busy, the last computed settings are used
+    so a check never waits behind a build. The owning module of a file is found from
+    `unmanagedSourceDirectories` / `managedSourceDirectories` (settings, off-loop).
+  - **Changed siblings:** module sources whose current Zinc stamp differs from the
+    last compile (or that are new) are checked in the same run as the requested files,
+    because their compiled classes are stale. A never-compiled module checks all of its
+    sources. `scope:"module"` checks every source.
+
 ## Internals map
 
 | Concern | Where |
@@ -111,6 +158,7 @@ meta-build classloader.
 | Plugin, lifecycle, command registration, refresh orchestration | `SbtMcpPlugin` |
 | Isolated MCP server facade / child implementation | `McpServerRuntime`; `McpServerRuntimeImpl`, `IsolatedMcpBridge` under `src/isolated-runtime` |
 | In-process command execution / output capture / failure detection | `sbt.McpInProcess` (package `sbt`) |
+| `check`: module settings, sessions, changed-sibling detection, rendering | `SbtMcpPlugin` (settings/owner resolution), `ModuleCheck`, `IsolatedCheck`; embedded `src/isolated-check`: `IsolatedCheckBridge` |
 | tasty-query isolation + index + symbol operations | Parent: `IsolatedSymbolIndex`, `SymbolIndexState`; embedded `src/isolated-symbol`: `IsolatedSymbolBridge`, `LazyClasspath`, `SymbolIndex` |
 
 `sbt.McpInProcess` lives in `package sbt` to reach the internals sbt exposes for
@@ -131,6 +179,11 @@ channel `append`) — the same family as `State.unsafeRunTask`.
   when a symbol tool is invoked). An aggregating active project includes all of its
   transitive aggregates; a leaf includes only its own classpath. Exposing a different
   target project as a tool argument is a planned enhancement.
+- **`check` scope.** It checks one module at a time. Modules that *depend on* the
+  checked one are not re-checked (a real `compile` of the aggregate is still the final
+  gate). Deleted sources' classes remain on the classpath until the next compile.
+  `.java` sources cannot be requested (Java sources are seen through their last
+  compiled classes). Scala 2 modules and Scala 3 before 3.3 are refused.
 - **`get-docs` is out of scope** — proxy `javadocs.dev` (MCP or API) instead.
 
 ## Running without publishing
@@ -174,13 +227,30 @@ Under `src/sbt-test/server/`, run with `sbt scripted` or `sbt 'scripted server/<
 - **`docs-proxy`** — starts a local upstream MCP server (with a `docs-echo` tool),
   points `mcpDocsUrl` at it, and asserts our `tools/list` merges the upstream tool
   and forwards a call to it — hermetic, no external network.
-- **`multi-protocol`** — verifies the five built-ins plus a proxied local tool are
+- **`multi-protocol`** — verifies the six built-ins plus a proxied local tool are
   listed under every zio-http-mcp protocol revision (modern `2026-07-28` and all
   legacy Streamable HTTP revisions).
 - **`multi-module`** — under sbt 2.0, compiles a Toolbook-shaped aggregate on
   Scala 3.9 (shared-module `dependsOn`, empty-package symbols), asserts the isolated
   reader is tasty-query 1.9, and verifies real `glob-search` / `inspect` calls see
   submodule symbols. Also verifies `mcpStatus` does not aggregate across projects.
+- **`check-parity`** — differential oracle for `check`: a corpus of 25 cases (type,
+  syntax, name, override/abstract-member, inline `compiletime.error`, exhaustivity,
+  unused, deprecation, givens, explicit nulls, `@tailrec`, erasure clash, unreachable
+  case, pure-expression, transparent inline, init order, named tuples, Scala 2 syntax,
+  Java interop, `Mirror` derivation, cycles) is run through `check` (as an unsaved
+  overlay and from disk) AND a real `compile`, for Scala 3.3.1 / 3.3.8 / 3.5.2 /
+  3.7.4 / 3.8.4 / 3.9.0 and strict (`-Werror -Wunused:all -Yexplicit-nulls
+  -deprecation -feature` + safe-init) / `-source:future -explain` option sets. Every
+  positioned diagnostic (file, line, column, severity, error code) and the pass/fail
+  status must be identical. Logs median check vs compile time per module.
+- **`check-scenarios`** — a multi-module build: `dependsOn`, a quoted macro from an
+  upstream module (error reported at the call site, column matching `compile`), the
+  Test configuration with munit (and main sources not seeing it), changed siblings
+  (content stamps, not mtimes), `scope:"module"`, session invalidation after a compile,
+  upstream auto-compile and broken-upstream fallback, Scala 2 / validation refusals,
+  output rendering, a warm-vs-compile performance assertion, and the `check` MCP tool
+  over HTTP (incl. concurrent calls) while the command loop is busy.
 - **`ci-disable`** — verifies `mcpDisableInCI` defaults to true and, when the scripted
   suite runs under CI or with Heroku's `SOURCE_VERSION`, proves an enabled server did
   not bind its configured port.
@@ -188,6 +258,8 @@ Under `src/sbt-test/server/`, run with `sbt scripted` or `sbt 'scripted server/<
 Server-starting scripted fixtures set `mcpDisableInCI := false` explicitly so they
 continue to exercise the embedded server on CI runners. `SbtMcpPluginSpec` tests the
 startup decision, including the default CI/Heroku guard and its explicit override.
+`ModuleCheckSpec` unit-tests `check`'s option sanitizing, `-Werror` handling, scope
+parsing, Scala-version gate, changed-source detection, and rendering.
 
 The real-client eval `SbtMcpKiroDocsSpec` is intentionally outside `scripted`: it
 connects to production `https://www.javadocs.dev/mcp`, verifies the proxied tools

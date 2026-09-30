@@ -1,0 +1,13 @@
+# Baseline: every module compiles (so each has last-compiled classes on disk).
+> compile
+
+# Differential check-vs-compile parity for each Scala version / option set.
+> checkParity v331
+> checkParity v338
+> checkParity v352
+> checkParity v374
+> checkParity v384
+> checkParity v390
+> checkParity strict338
+> checkParity strict390
+> checkParity future390

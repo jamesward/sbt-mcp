@@ -13,6 +13,7 @@ JVM and exposes tools an AI agent can call:
 | `glob-search` | Search Scala 3 symbols by name (TASTy); `query:"*"` + `inPackage` lists ALL symbols in a package |
 | `inspect`     | List a symbol's members and (approximate) signatures (TASTy)                 |
 | `symbol-location` | Return a symbol's source location as `path:line` (from its TASTy tree position) |
+| `check`       | Fast syntax + type check of Scala 3 files **without compiling** (the project's own compiler, warm and in-process; doesn't wait behind a build) |
 
 Plus **documentation tools proxied from [javadocs.dev](https://www.javadocs.dev/mcp)**:
 its tools are merged into the tool list, and any tool call that doesn't match a
@@ -86,6 +87,24 @@ stops its embedded server; keep a long-lived sbt session loaded while clients us
   still answer from the last successful compile and append a
   `(note: the project does not currently compile …)` line — a signal to fix the
   build (e.g. via `sbt-task`) before new symbols will appear.
+- **Fast checks while editing.** `check` validates Scala 3 sources without
+  compiling, typically in a few hundred milliseconds:
+  `{"files":["app/src/main/scala/app/Service.scala"]}`. It runs the module's own
+  Scala compiler, kept loaded and JIT-warm in-process, through every checking phase
+  (parser, typer, macro/inline expansion, override and abstract-member checks,
+  erasure clashes, `@tailrec`, pattern-match exhaustivity, unused/deprecation
+  warnings) with the module's classpath and `scalacOptions`, stopping only before bytecode generation.
+  It never writes class files and runs off sbt's command loop, so it doesn't queue
+  behind a running compile or `~` watch.
+  - `content` checks unsaved text instead of the file on disk (one file).
+  - Sources of the same module edited since the last compile are checked along with
+    the requested files automatically (their compiled classes are stale).
+  - `scope:"module"` re-checks every source of the module — use it after changing
+    an API to find breakage in the files that *use* it.
+  - Upstream modules are compiled as needed so their current API is visible; if one
+    doesn't compile, its last compiled classes are used (with a note).
+  - Still run `compile` / `test` via `sbt-task` before finishing: downstream modules,
+    Java sources, and code generation are only covered by a real build.
 - **Running tasks.** `sbt-task` (e.g. `{"command":"compile"}`, `{"command":"test"}`,
   `{"command":"testOnly com.example.MySpec"}`) runs on sbt's command loop and works
   even while a `~` watch is active. It returns status, elapsed milliseconds, and

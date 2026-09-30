@@ -25,7 +25,7 @@ object ToolsHarness:
     val (toolNames, inspectOut, tasksOut, serverInfo) = Unsafe.unsafe { implicit unsafe =>
       Runtime.default.unsafe.run(program.provide(Client.default)).getOrThrow()
     }
-    val required = Set("sbt-task", "list-tasks", "glob-search", "inspect", "symbol-location")
+    val required = Set("sbt-task", "list-tasks", "glob-search", "inspect", "symbol-location", "check")
     assert(required.subsetOf(toolNames), s"missing MCP tools; got: $toolNames")
     assert(inspectOut.contains("label"), s"inspect(example.Widget) did not include label: $inspectOut")
     assert(tasksOut.contains("compile"), s"list-tasks did not include compile: $tasksOut")

@@ -71,6 +71,7 @@ object McpServerRuntime:
       refresh: () => Option[String],
       listTasks: () => List[(String, String)],
       docsUrl: Option[String],
+      check: (List[String], Option[String], Option[String]) => String = (_, _, _) => "check: not available",
   ): Handle =
     val (loader, directory) = runtimeLoader()
     try
@@ -101,6 +102,14 @@ object McpServerRuntime:
           ,
           new Function[String, String]:
             def apply(symbol: String): String = location(symbol)
+          ,
+          new Function[java.util.List[String], String]:
+            // [scope, content flag ("1"/"0"), content, file...] — see IsolatedMcpBridge.
+            def apply(encoded: java.util.List[String]): String =
+              val values  = encoded.asScala.toList
+              val scope   = values.headOption.filter(_.nonEmpty)
+              val content = if values.lift(1).contains("1") then values.lift(2) else None
+              check(values.drop(3), content, scope)
           ,
           docsUrl.orNull,
         )
