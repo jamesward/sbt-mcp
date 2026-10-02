@@ -1,12 +1,13 @@
 {
   "mcpServers": {
-    "sbt-mcp": {
-      "url": "http://127.0.0.1:5010/",
-      "timeout": 1800000,
-      "disabled": true
-    },
     "javadocs": {
       "url": "https://javadocs.dev/mcp"
+    },
+    "sbt-mcp-sbt-mcp": {
+      "type": "http",
+      "url": "http://127.0.0.1:5108/",
+      "timeout": 1800000,
+      "disabled": false
     }
   }
 }

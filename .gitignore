@@ -4,3 +4,6 @@ target/
 .metals/
 .bloop/
 *.class
+
+# Agent Skills extracted by the build
+/.kiro/skills/
