@@ -32,7 +32,7 @@ object McpTestFailureListenerSpec extends ZIOSpecDefault:
 
   // What a forked ZIO Test failure looks like by the time sbt hands it to listeners.
   private val forkedFailure = new Exception(
-    "sbt.internal.worker1.PersistedException: java.lang.Exception:   - finds versions\n" +
+    "sbt.internal.worker1.ForkTestMain$ForkError: sbt.internal.worker1.PersistedException: java.lang.Exception:   - finds versions\n" +
       "    \u001B[31m✗ \u001B[0m\"beta\" was not equal to \"alpha\""
   )
 
@@ -44,6 +44,7 @@ object McpTestFailureListenerSpec extends ZIOSpecDefault:
         lines.exists(_.contains("\"beta\" was not equal to \"alpha\"")),
         !lines.exists(_.contains("\u001B")),
         !lines.exists(_.contains("PersistedException")),
+        !lines.exists(_.contains("ForkError")),
         !lines.exists(_.contains("java.lang.Exception")),
       )
     },

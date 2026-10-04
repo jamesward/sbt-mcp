@@ -17,6 +17,7 @@ commands += Command.command("mcpTestVariants") { state =>
   assert(out.contains("compares words"), s"missing test name:\n$out")
   assert(out.contains("\"beta\" was not equal to \"alpha\""), s"missing assertion message:\n$out")
   assert(!out.contains("FailingSpec / passes"), s"passing test reported:\n$out")
+  assert(!out.contains("ForkError") && !out.contains("PersistedException"), s"fork wrappers not stripped:\n$out")
 
   // Outside an sbt-task call the listener stays silent (console runs aren't duplicated).
   val (_, _, plain) = sbt.McpInProcess.runOnLoop(state, "Test/testOnly FailingSpec")

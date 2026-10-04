@@ -43,7 +43,8 @@ private[sbtmcp] object McpTestFailureListener {
 
   private val MaxMessageChars = 4000
 
-  private val WrapperPrefixes = List("sbt.internal.worker1.PersistedException:", "java.lang.Exception:")
+  private val WrapperPrefixes =
+    List("sbt.internal.worker1.ForkTestMain$ForkError:", "sbt.internal.worker1.PersistedException:", "java.lang.Exception:")
 
   def render(e: TEvent): String = {
     // ZIO Test names a test "<Suite> - <test>"; drop a leading suite label that repeats the class.
