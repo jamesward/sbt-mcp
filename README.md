@@ -8,7 +8,7 @@ JVM and exposes tools an AI agent can call:
 
 | Tool          | What it does                                                                 |
 |---------------|------------------------------------------------------------------------------|
-| `sbt-task`    | Run an sbt command/task (works during a `~` watch); returns `[ok]`/`[error]` + captured compiler output |
+| `sbt-task`    | Run an sbt command/task (works during a `~` watch); returns `[ok]`/`[error]` + captured compiler output, and each failed test's name and assertion message |
 | `list-tasks`  | List the build's tasks/settings with descriptions (optional `all` flag; per-task `help` via `task`) |
 | `glob-search` | Search Scala 3 symbols by name (TASTy); `query:"*"` + `inPackage` lists ALL symbols in a package |
 | `inspect`     | List a symbol's members and (approximate) signatures (TASTy)                 |

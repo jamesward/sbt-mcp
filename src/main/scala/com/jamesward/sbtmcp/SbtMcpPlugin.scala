@@ -138,7 +138,7 @@ object SbtMcpPlugin extends AutoPlugin {
         case None => state
         case Some((commandLine, promise)) =>
           val startedAtNanos = System.nanoTime()
-          val (_, result, output) = sbt.McpInProcess.runOnLoop(state, commandLine)
+          val (_, result, output) = runForTool(state, commandLine)
           val elapsedMillis = java.util.concurrent.TimeUnit.NANOSECONDS.toMillis(System.nanoTime() - startedAtNanos)
           val text = commandResultText(commandLine, result, output, elapsedMillis)
           promise.trySuccess(text)
@@ -149,6 +149,16 @@ object SbtMcpPlugin extends AutoPlugin {
           state
       }
     }
+
+  /**
+   * Run a command on the loop exactly as `sbt-task` does: captured log output, with
+   * test failures reported through the logger. Call it ON the command loop.
+   */
+  def runForTool(state: State, commandLine: String): (State, Either[String, Unit], String) = {
+    McpTestFailureListener.active.set(true)
+    try sbt.McpInProcess.runOnLoop(state, commandLine)
+    finally McpTestFailureListener.active.set(false)
+  }
 
   private[sbtmcp] def commandResultText(
       commandLine: String,
@@ -542,6 +552,10 @@ object SbtMcpPlugin extends AutoPlugin {
     },
     // Single build-wide server (see mcpStatus): print the guidance once, not per module.
     mcpInstall / aggregate := false,
+    // Test frameworks print results to the test JVM's stdout, which never reaches the
+    // log `sbt-task` returns. Log each failed test's name and message through sbt's
+    // logger while an `sbt-task` runs, so the response says which assertion failed.
+    Test / testListeners += new McpTestFailureListener(state.value.log),
   )
 
   /**

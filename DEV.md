@@ -64,6 +64,16 @@ meta-build classloader.
   parse-error callback, or a thrown `Incomplete`). The sub-command's command-flow
   mutations are not leaked back into the loop.
 
+- **Test failures reach the `sbt-task` response.** Test frameworks (ZIO Test, munit,
+  ScalaTest) render results to the test JVM's stdout, forked or not, which sbt relays
+  to the console but never writes to the global log, so the captured delta used to
+  hold only `Failed tests: <Spec>`. `McpTestFailureListener` is added to
+  `Test / testListeners`; sbt hands it every test event (the same events the JUnit XML
+  reports use), and it logs each failed or errored test's name and rendered message
+  (ANSI and fork wrappers stripped, 4000 characters max) through sbt's logger. It
+  only logs while `SbtMcpPlugin.runForTool` (`mcpExec`) runs, so console runs aren't
+  duplicated. Test stdout (`println`) still isn't captured.
+
 - **Symbol tools auto-refresh, decoupled from the task engine.** `glob-search` /
   `inspect` / `symbol-location` run on zio-http threads. Before each query they
   enqueue an internal refresh onto the command loop (`SbtMcpPlugin.refreshFromState`
@@ -218,6 +228,9 @@ Under `src/sbt-test/server/`, run with `sbt scripted` or `sbt 'scripted server/<
 - **`compile-output`** — three compile variants (success / warning / failure);
   asserts `sbt-task` captures the exhaustivity **warning**, the type **error**, and a
   clean **success**, and that failures are reported as `[error]` (not `[ok]`).
+- **`test-output`** — a forked ZIO Test spec with one failing assertion; asserts
+  `runForTool` (the `sbt-task` path) returns the failed test's name and assertion
+  message, and that a plain console run doesn't get the extra lines.
 - **`incremental-symbols`** — lists all symbols in a package (`glob-search "*"`), adds
   a new source, re-indexes, and asserts the new symbol appears (verifying refresh
   invalidates the cached isolated reader session).

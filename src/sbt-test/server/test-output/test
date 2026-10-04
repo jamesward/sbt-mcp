@@ -1,0 +1,2 @@
+# A failing test run through the sbt-task path reports the assertion message.
+> mcpTestVariants
