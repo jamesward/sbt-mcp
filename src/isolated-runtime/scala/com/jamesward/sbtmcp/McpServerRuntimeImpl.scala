@@ -347,9 +347,13 @@ object McpServerRuntimeImpl {
           ZIO.logWarning(s"sbt-mcp: docs proxy ($url) listTools failed: $e").as(Chunk.empty)
         )
 
+    // Every call opens its own upstream session, so a transient failure (for example an
+    // `initialize` rejected while the upstream restarts, seen as JSON-RPC -32601 during
+    // parallel lookups) is retried on a fresh session before it's reported.
     def callTool(name: ToolName, args: Option[Json.Obj], ctx: McpToolContext): ZIO[Client, Nothing, CallToolResult] =
       ZIO
         .scoped(McpClient.connect(McpClientConfig(url, clientInfo = docsProxyClientInfo)).flatMap(_.callTool(name.value, args.getOrElse(Json.Obj()))))
+        .retry(Schedule.exponential(500.millis) && Schedule.recurs(2))
         .catchAll(e =>
           ZIO.logWarning(s"sbt-mcp: docs proxy ($url) callTool '${name.value}' failed: $e").as(
             CallToolResult(

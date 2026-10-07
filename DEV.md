@@ -237,7 +237,7 @@ Under `src/sbt-test/server/`, run with `sbt scripted` or `sbt 'scripted server/<
 - **`symbol-location`** — asserts `symbol-location` returns a symbol's `path:line`.
 - **`refresh-error`** — asserts the refresh fails on a non-compiling project (what
   makes the tools surface the stale-index note).
-- **`docs-proxy`** — starts a local upstream MCP server (with a `docs-echo` tool),
+- **`docs-proxy`** — starts a local upstream MCP server (with a `docs-echo` tool, and rejecting the first forwarded `tools/call` to check the retry),
   points `mcpDocsUrl` at it, and asserts our `tools/list` merges the upstream tool
   and forwards a call to it — hermetic, no external network.
 - **`multi-protocol`** — verifies the six built-ins plus a proxied local tool are
