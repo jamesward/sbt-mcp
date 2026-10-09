@@ -1,0 +1,5 @@
+// The root build.s sbt-mcp settings, in the old `Global /` style.
+Global / mcpEnabled     := true
+Global / mcpDisableInCI := false
+Global / mcpPort        := 5091
+Global / mcpDocsUrl     := None

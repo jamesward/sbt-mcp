@@ -33,11 +33,20 @@ The plugin triggers on all JVM projects but does nothing until you enable it.
 
 ```scala
 // build.sbt (or a local, git-ignored dev override)
-Global / mcpEnabled     := true        // default: false
-Global / mcpDisableInCI := true        // default: true; set false to allow startup in CI/Heroku
-Global / mcpPort        := 5010        // default: 5010
-Global / mcpHost        := "127.0.0.1" // default: loopback only
+ThisBuild / mcpEnabled     := true        // default: false
+ThisBuild / mcpDisableInCI := true        // default: true; set false to allow startup in CI/Heroku
+ThisBuild / mcpPort        := 5010        // default: 5010
+ThisBuild / mcpHost        := "127.0.0.1" // default: loopback only
 ```
+
+Use `ThisBuild /` (or plain root-project settings), not `Global /`. Global is one scope
+shared by every build sbt loads, so when this build depends on another checkout from
+source (`RootProject(file("../other"))` or `ProjectRef`) and that build sets
+`Global / mcpPort`, it can replace yours. Only one MCP server runs per sbt JVM, and it's
+always the one configured by the build you launched (its root project); a source
+dependency's own sbt-mcp settings are ignored. sbt-mcp warns at load when another
+build's `Global /` setting would win. To use the dependency's MCP server too, run sbt in
+its own checkout, where it listens on its own port.
 
 When enabled, the server starts on the next sbt load and prints:
 

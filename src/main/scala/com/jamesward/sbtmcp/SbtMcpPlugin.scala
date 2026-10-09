@@ -35,9 +35,12 @@ import scala.jdk.OptionConverters.*
  *   1. The lifecycle hooks live in [[globalSettings]] on `Global / onLoad` /
  *      `Global / onUnload`, which fire once per build load/unload — NOT once per
  *      aggregated project.
- *   2. `mcpEnabled` / `mcpDisableInCI` / `mcpPort` / `mcpHost` are global settings,
- *      so there is a
- *      single source of truth for whether/where the server runs.
+ *   2. `mcpEnabled` / `mcpDisableInCI` / `mcpPort` / `mcpHost` default in Global and
+ *      are read from the root build's root project, so the build you launched
+ *      decides whether/where the server runs. Set them with `ThisBuild /` (or as
+ *      root-project settings): a source dependency (`RootProject`/`ProjectRef` to
+ *      another checkout) that sets `Global / mcp*` overrides the root build's own
+ *      Global value, and [[foreignGlobalMcpSettings]] warns about exactly that.
  *   3. [[serverHandle]] is a process-global `AtomicReference` and [[maybeStartServer]]
  *      uses an atomic compare-and-set gate, so even if `onLoad` were invoked
  *      more than once (e.g. a `reload`), only the first call binds a port; the
@@ -524,10 +527,10 @@ object SbtMcpPlugin extends AutoPlugin {
         case Some(h) => log.info(s"sbt-mcp: running at http://${h.host}:${h.port}/")
         case None if enabled && disableInCI && isAutomatedBuild(sys.env) =>
           log.info(
-            "sbt-mcp: not running (disabled in CI or a Heroku build; set `Global / mcpDisableInCI := false` to override)"
+            "sbt-mcp: not running (disabled in CI or a Heroku build; set `ThisBuild / mcpDisableInCI := false` to override)"
           )
         case None if enabled => log.info("sbt-mcp: not running (server startup failed or has not completed)")
-        case None            => log.info("sbt-mcp: not running (set `Global / mcpEnabled := true` to enable)")
+        case None            => log.info("sbt-mcp: not running (set `ThisBuild / mcpEnabled := true` to enable)")
       }
     },
     // The MCP server is a single process-global instance shared by the whole build,
@@ -566,21 +569,22 @@ object SbtMcpPlugin extends AutoPlugin {
   private def maybeStartServer(state: State): Unit = {
     if (serverHandle.get.isDefined) return
     val extracted   = Project.extract(state)
-    val enabled     = extracted.getOpt(mcpEnabled).getOrElse(false)
-    val disableInCI = extracted.getOpt(mcpDisableInCI).getOrElse(true)
+    val enabled     = extracted.getOpt(rootRef(extracted) / mcpEnabled).getOrElse(false)
+    val disableInCI = extracted.getOpt(rootRef(extracted) / mcpDisableInCI).getOrElse(true)
     if (!shouldStartServer(enabled, disableInCI, sys.env)) {
       if (enabled && disableInCI && isAutomatedBuild(sys.env))
         state.log.info(
-          "sbt-mcp: MCP server disabled in CI or a Heroku build (set `Global / mcpDisableInCI := false` to override)"
+          "sbt-mcp: MCP server disabled in CI or a Heroku build (set `ThisBuild / mcpDisableInCI := false` to override)"
         )
       return
     }
+    foreignGlobalMcpSettings(extracted).foreach(w => state.log.warn(w))
     if (!starting.compareAndSet(false, true)) return // another thread is starting it
     try {
       if (serverHandle.get.isEmpty) {
-        val host   = extracted.getOpt(mcpHost).getOrElse("127.0.0.1")
-        val port   = extracted.getOpt(mcpPort).getOrElse(5010)
-        val docsUrl = extracted.getOpt(mcpDocsUrl).flatten
+        val host   = extracted.getOpt(rootRef(extracted) / mcpHost).getOrElse("127.0.0.1")
+        val port   = extracted.getOpt(rootRef(extracted) / mcpPort).getOrElse(5010)
+        val docsUrl = extracted.getOpt(rootRef(extracted) / mcpDocsUrl).flatten
         val handle = McpServerRuntime.start(
           host,
           port,
@@ -603,6 +607,58 @@ object SbtMcpPlugin extends AutoPlugin {
     } finally {
       starting.set(false)
     }
+  }
+
+  /** The root project of the root build (the build sbt was launched in), whatever the session's current project is. */
+  private def rootRef(extracted: Extracted): ProjectRef = {
+    val root = extracted.structure.root
+    ProjectRef(root, extracted.structure.rootProject(root))
+  }
+
+  private val McpSettingLabels = Set("mcpEnabled", "mcpDisableInCI", "mcpPort", "mcpHost", "mcpDocsUrl")
+
+  /**
+   * A warning when a build other than the root build defines a `Global / mcp*` setting
+   * that the root build doesn't set at `ThisBuild` or root-project level. Global is one
+   * scope shared by every loaded build, so a source dependency's `Global / mcpPort`
+   * replaces a root build's `Global / mcpPort`: this server would bind the dependency's
+   * port, which its own sbt is probably already using.
+   */
+  def foreignGlobalMcpSettings(extracted: Extracted): Option[String] = {
+    // The build a file belongs to is the loaded build with the deepest base directory
+    // containing it (a dependency checkout can live inside the root build's directory).
+    val bases = extracted.structure.units.toSeq.map((uri, unit) => (uri, unit.localBase.getCanonicalFile.toPath))
+    def owner(f: java.io.File): Option[java.net.URI] =
+      bases.filter((_, b) => f.toPath.startsWith(b)).sortBy((_, b) => -b.getNameCount).headOption.map(_._1)
+    // Settings the root build sets itself (`ThisBuild /` or on its root project) win over
+    // Global, so a foreign Global value only matters for the ones it doesn't.
+    val root = rootRef(extracted)
+    val rootLevel: Set[String] = extracted.structure.settings.collect {
+      case s if McpSettingLabels(s.key.key.label) && (s.key.scope.project match {
+            case Select(BuildRef(b))     => b == root.build
+            case Select(p: ProjectRef)   => p == root
+            case _                       => false
+          }) => s.key.key.label
+    }.toSet
+    val foreign = extracted.structure.settings.flatMap { s =>
+      val key = s.key
+      if (!McpSettingLabels(key.key.label) || key.scope != Scope.Global || rootLevel(key.key.label)) None
+      else
+        positionPath(s.pos).map(new java.io.File(_).getCanonicalFile).filter { f =>
+          owner(f).exists(_ != extracted.structure.root)
+        }.map(f => s"Global / ${key.key.label} (${f.getPath})")
+    }.distinct
+    Option.when(foreign.nonEmpty)(
+      s"""sbt-mcp: another build sets ${foreign.mkString(", ")}, which overrides this build's
+         |sbt-mcp settings (Global is shared by every loaded build, e.g. a RootProject/ProjectRef
+         |source dependency). Set sbt-mcp settings with `ThisBuild /` in both builds; this build's
+         |root project then decides the server's port.""".stripMargin
+    )
+  }
+
+  private def positionPath(pos: sbt.internal.util.SourcePosition): Option[String] = pos match {
+    case p: sbt.internal.util.FilePosition => Some(p.path).filterNot(_.isEmpty)
+    case _                                 => None
   }
 
   private[sbtmcp] def shouldStartServer(
@@ -638,8 +694,8 @@ object SbtMcpPlugin extends AutoPlugin {
         s"""The MCP server is NOT enabled yet. Enable it by adding to build.sbt (or a
            |git-ignored local dev override):
            |
-           |    Global / mcpEnabled := true
-           |    Global / mcpPort    := $port
+           |    ThisBuild / mcpEnabled := true
+           |    ThisBuild / mcpPort    := $port
            |
            |then `reload` sbt so the server starts.""".stripMargin
 

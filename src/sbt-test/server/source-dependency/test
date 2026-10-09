@@ -1,0 +1,16 @@
+# Root build `ThisBuild /`, dependency `Global /` (an older checkout): the root build's own
+# settings win over Global, so the server is the root build's, on 5091. No warning.
+> compile
+> checkSourceDependency 5091 false
+
+# Both `Global /`: Global is one scope shared by every loaded build, so the dependency's
+# port can replace the root build's. sbt-mcp warns and names the dependency's file.
+$ copy-file global.txt mcp.sbt
+> reload
+> checkSourceDependency any true
+
+# Both `ThisBuild /` (the recommendation): the root build's port, no warning.
+$ copy-file thisbuild.txt mcp.sbt
+$ copy-file dep/thisbuild.txt dep/mcp.sbt
+> reload
+> checkSourceDependency 5091 false

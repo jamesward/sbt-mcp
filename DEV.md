@@ -36,7 +36,10 @@ meta-build classloader.
   server for the whole build:
   - lifecycle hooks live on `Global / onLoad` / `Global / onUnload` (fire once per
     build load/unload, not once per aggregated project);
-  - `mcpEnabled` / `mcpDisableInCI` / `mcpPort` / `mcpHost` are **global** settings;
+  - `mcpEnabled` / `mcpDisableInCI` / `mcpPort` / `mcpHost` / `mcpDocsUrl` default in Global and
+    are read from the root build's root project (`rootRef`), so the build you launched decides.
+    Builds set them with `ThisBuild /`: a source dependency's `Global /` value would replace a
+    root build's `Global /` value, and `foreignGlobalMcpSettings` warns when that can happen;
   - startup is skipped when `mcpDisableInCI` is true (the default) and either `CI`
     is truthy or Heroku provides a nonblank `SOURCE_VERSION` during its build;
   - the server handle is a process-global `AtomicReference` guarded by an atomic
@@ -231,6 +234,11 @@ Under `src/sbt-test/server/`, run with `sbt scripted` or `sbt 'scripted server/<
 - **`test-output`** — a forked ZIO Test spec with one failing assertion; asserts
   `runForTool` (the `sbt-task` path) returns the failed test's name and assertion
   message, and that a plain console run doesn't get the extra lines.
+- **`source-dependency`** — a root build that depends on another checkout (`dep/`) through
+  `RootProject`, both with sbt-mcp on different ports. Asserts the server is the root
+  build's when the root uses `ThisBuild /` (even if the dependency uses `Global /`), that
+  sbt-mcp warns and the dependency's port wins when both use `Global /`, and that both
+  `ThisBuild /` is clean.
 - **`incremental-symbols`** — lists all symbols in a package (`glob-search "*"`), adds
   a new source, re-indexes, and asserts the new symbol appears (verifying refresh
   invalidates the cached isolated reader session).
