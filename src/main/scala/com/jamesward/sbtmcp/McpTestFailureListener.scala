@@ -25,17 +25,13 @@ private[sbtmcp] final class McpTestFailureListener(log: Logger) extends TestRepo
 
   def startGroup(name: String): Unit = ()
 
-  def testEvent(event: TestEvent): Unit = {
-    event.detail.foreach(McpRunRecorder.recordTest)
+  def testEvent(event: TestEvent): Unit =
     if (active.get) event.detail.filter(e => e.status == TStatus.Failure || e.status == TStatus.Error).foreach { e =>
       render(e).linesIterator.foreach(line => log.error(line))
     }
-  }
 
-  def endGroup(name: String, t: Throwable): Unit = {
-    McpRunRecorder.recordSuiteError(name, t)
+  def endGroup(name: String, t: Throwable): Unit =
     if (active.get) log.error(s"sbt-mcp test error: $name: ${messageOf(t)}")
-  }
 
   def endGroup(name: String, result: TestResult): Unit = ()
 }
@@ -50,16 +46,11 @@ private[sbtmcp] object McpTestFailureListener {
   private val WrapperPrefixes =
     List("sbt.internal.worker1.ForkTestMain$ForkError:", "sbt.internal.worker1.PersistedException:", "java.lang.Exception:")
 
-  /** The suite (fully-qualified class) and, when the selector names one, the test within it. */
-  def names(e: TEvent): (String, Option[String]) = {
+  def render(e: TEvent): String = {
     // ZIO Test names a test "<Suite> - <test>"; drop a leading suite label that repeats the class.
     val simple = e.fullyQualifiedName.split('.').last
-    (e.fullyQualifiedName, testName(e.selector).map(n => n.stripPrefix(s"$simple - ").stripPrefix(s"$simple / ")))
-  }
-
-  def render(e: TEvent): String = {
-    val (suite, test) = names(e)
-    val name   = s"$suite${test.fold("")(" / " + _)}"
+    val test   = testName(e.selector).map(n => n.stripPrefix(s"$simple - ").stripPrefix(s"$simple / "))
+    val name   = s"${e.fullyQualifiedName}${test.fold("")(" / " + _)}"
     val status = if (e.status == TStatus.Error) "ERROR" else "FAILED"
     val detail =
       if (e.throwable.isDefined) messageOf(e.throwable.get)
