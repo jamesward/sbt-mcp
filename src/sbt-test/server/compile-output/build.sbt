@@ -32,6 +32,17 @@ commands += Command.command("mcpCompileVariants") { state =>
     s"fail/compile output should contain the compile error:\n$out3"
   )
 
+  // 4) a multi-command line runs every part, in order (it used to return Right with no output)
+  val (_, r4, out4) = run("warn/clean; warn/compile")
+  assert(r4.isRight, s"warn/clean; warn/compile should succeed, got: $r4\n$out4")
+  assert(out4.contains("Evaluating tasks: warn / clean") && out4.contains("Evaluating tasks: warn / Compile / compile"),
+    s"every command of a chain should run:\n$out4")
+
+  // 5) a chain stops at the first failure and reports it
+  val (_, r5, out5) = run("fail/compile; warn/clean; warn/compile")
+  assert(r5.isLeft, s"a chain with a failing command should fail, got: $r5\n$out5")
+  assert(!out5.contains("warn / clean"), s"commands after a failure must not run:\n$out5")
+
   state.log.info("mcpCompileVariants OK: captured success, warning, and error output")
   state.log.info(s"[warn/compile captured]\n$out2")
   state.log.info(s"[fail/compile captured]\n$out3")

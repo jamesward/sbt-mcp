@@ -18,6 +18,7 @@ object IsolatedMcpBridge:
       inspectSymbol: Function[String, String],
       locateSymbol: Function[String, String],
       check: Function[java.util.List[String], String],
+      buildTool: BiFunction[String, java.util.Map[String, java.util.List[String]], String],
       docsUrl: String,
   ): Object =
     try StartResult(McpServerRuntimeImpl.start(
@@ -37,6 +38,7 @@ object IsolatedMcpBridge:
         check.apply(
           (scope.getOrElse("") :: (if content.isDefined then "1" else "0") :: content.getOrElse("") :: files).asJava
         ),
+      (tool, args) => buildTool.apply(tool, args.iterator.map { case (k, v) => k -> v.asJava }.toMap.asJava),
       Option(docsUrl),
     ), null)
     catch

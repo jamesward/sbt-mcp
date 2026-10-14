@@ -72,6 +72,7 @@ object McpServerRuntime:
       listTasks: () => List[(String, String)],
       docsUrl: Option[String],
       check: (List[String], Option[String], Option[String]) => String = (_, _, _) => "check: not available",
+      buildTool: (String, Map[String, List[String]]) => String = (tool, _) => s"$tool: not available (no loaded sbt build)",
   ): Handle =
     val (loader, directory) = runtimeLoader()
     try
@@ -110,6 +111,11 @@ object McpServerRuntime:
               val scope   = values.headOption.filter(_.nonEmpty)
               val content = if values.lift(1).contains("1") then values.lift(2) else None
               check(values.drop(3), content, scope)
+          ,
+          new BiFunction[String, java.util.Map[String, java.util.List[String]], String]:
+            // Structured build tools: tool name + its arguments as string lists.
+            def apply(tool: String, args: java.util.Map[String, java.util.List[String]]): String =
+              buildTool(tool, args.asScala.iterator.map { case (k, v) => k -> v.asScala.toList }.toMap)
           ,
           docsUrl.orNull,
         )

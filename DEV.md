@@ -228,7 +228,7 @@ Under `src/sbt-test/server/`, run with `sbt scripted` or `sbt 'scripted server/<
   zio-http-mcp's `McpClient`, and asserts `listTools` advertises all five tools and
   that `inspect` / `glob-search` / `list-tasks` read the project's TASTy. Also checks
   the in-process command primitive (`compile` succeeds, a bogus command fails).
-- **`compile-output`** — three compile variants (success / warning / failure);
+- **`compile-output`** — three compile variants (success / warning / failure), plus multi-command lines (every part runs; a failure stops the rest);
   asserts `sbt-task` captures the exhaustivity **warning**, the type **error**, and a
   clean **success**, and that failures are reported as `[error]` (not `[ok]`).
 - **`test-output`** — a forked ZIO Test spec with one failing assertion; asserts

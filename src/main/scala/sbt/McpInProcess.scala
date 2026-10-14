@@ -54,10 +54,34 @@ object McpInProcess {
     val logFile = state.globalLogging.backing.file
     val start   = if (logFile.isFile) logFile.length else 0L
     var parseError: Option[String] = None
-    val processed: (State, Option[String]) =
-      try (Command.process(commandLine, state, m => parseError = Some(m)), None)
-      catch { case NonFatal(e) => (state, Some(Option(e.getMessage).getOrElse(e.toString))) }
-    val (afterState, threw) = processed
+    // A multi-command line (`a; b`) doesn't run anything when processed: sbt's parser only
+    // queues its parts on `remainingCommands` for the command loop. The caller returns the
+    // loop's original state, so those parts would be dropped and the call would report
+    // `[ok]` with no output. Start from an empty queue and run everything the line queued,
+    // in order, stopping at the first failure, the way the shell would.
+    def step(st: State, cmd: String): Either[String, State] =
+      try Right(Command.process(cmd, st, m => parseError = Some(m)))
+      catch { case NonFatal(e) => Left(Option(e.getMessage).getOrElse(e.toString)) }
+    val isolated = state.copy(remainingCommands = Nil)
+    var current: State = isolated
+    var threw: Option[String] = None
+    var failedViaOnFailure = false
+    var pending: List[String] = List(commandLine)
+    var steps = 0
+    while (pending.nonEmpty && threw.isEmpty && parseError.isEmpty && !isFailure(current) && !failedViaOnFailure && steps < MaxQueuedCommands) {
+      val cmd = pending.head
+      val before = current.copy(remainingCommands = Nil)
+      step(before, cmd) match {
+        case Left(err) => threw = Some(err)
+        case Right(after) =>
+          failedViaOnFailure = before.onFailure.isDefined && after.onFailure.isEmpty
+          // Commands this one queued run next, ahead of the rest of the line.
+          pending = after.remainingCommands.map(_.commandLine) ++ pending.tail
+          current = after.copy(remainingCommands = Nil)
+      }
+      steps += 1
+    }
+    val afterState = current
     val captured = readDelta(logFile, start)
     // A failing command/task does NOT throw out of Command.process. sbt records the
     // failure in the State instead, two ways depending on whether an `onFailure`
@@ -65,14 +89,16 @@ object McpInProcess {
     //   - no handler: `state.fail` sets `next` to a non-zero `Return(Exit(...))`;
     //   - handler installed: `state.fail` CONSUMES `onFailure` (leaving next=Continue).
     // Mirror sbt's own exit-code logic by checking both, plus parse errors / throws.
-    val failedViaOnFailure = state.onFailure.isDefined && afterState.onFailure.isEmpty
     val failed = threw.isDefined || parseError.isDefined || isFailure(afterState) || failedViaOnFailure
     val result: Either[String, Unit] =
       if (failed) Left(threw.orElse(parseError).getOrElse("command failed"))
       else Right(())
     // Reset `next` so a failure isn't propagated as an exit into the State the caller threads on.
-    (afterState.continue, result, captured)
+    // Give back the caller's own queue: everything this line queued has run.
+    (afterState.copy(remainingCommands = state.remainingCommands).continue, result, captured)
   }
+
+  private final val MaxQueuedCommands = 1000
 
   private def isFailure(state: State): Boolean =
     state.next match {

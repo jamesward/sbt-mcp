@@ -94,6 +94,12 @@ object SbtMcpPlugin extends AutoPlugin {
     new ConcurrentHashMap[String, (ProjectRef, Configuration, Promise[Either[String, ModuleCheck.ModuleConfig]])]()
   private final val CheckConfigCmd = "mcpCheckConfigInternal"
 
+  // In-flight structured build-tool calls (`compile`, `test`, …), keyed by execId: the
+  // tool name, its arguments, and the promise the loop-side command completes.
+  private val pendingBuildTools =
+    new ConcurrentHashMap[String, (String, McpBuildTools.Args, Promise[String])]()
+  private final val BuildToolCmd = "mcpBuildToolInternal"
+
   // Last computed configuration per (project id, configuration name), used when the
   // command loop is busy (e.g. mid-compile) so `check` never has to wait behind it.
   private val checkConfigs = new ConcurrentHashMap[(String, String), ModuleCheck.ModuleConfig]()
@@ -116,6 +122,8 @@ object SbtMcpPlugin extends AutoPlugin {
     commands += mcpRefreshCommand,
     // `mcpCheckConfigInternal <id>` computes a module's `check` configuration on the loop.
     commands += mcpCheckConfigCommand,
+    // `mcpBuildToolInternal <id>` runs one structured build tool (compile, test, …) on the loop.
+    commands += mcpBuildToolCommand,
     onLoad := { (s: State) =>
       val s1 = onLoad.value(s) // run the previously-registered onLoad first
       currentState.set(Some(s1))
@@ -151,6 +159,53 @@ object SbtMcpPlugin extends AutoPlugin {
           // back into the loop.
           state
       }
+    }
+
+  /**
+   * Command that runs one queued structured build tool ([[McpBuildTools]]) ON the
+   * command loop and completes its promise with the JSON result (or an error message).
+   * Like `mcpExec`, it returns the loop's original state.
+   */
+  private def mcpBuildToolCommand: Command =
+    Command.single(BuildToolCmd) { (state, id) =>
+      Option(pendingBuildTools.remove(id)).foreach { case (tool, args, promise) =>
+        promise.trySuccess(buildToolOnLoop(state, tool, args))
+      }
+      state
+    }
+
+  /**
+   * Run a structured build tool against `state` ON the command loop (from the internal
+   * command, or directly from a build's own command, e.g. in scripted tests). Returns the
+   * tool's JSON object, or an error message (which never starts with `{`).
+   */
+  def buildToolOnLoop(state: State, tool: String, args: Map[String, List[String]]): String =
+    McpBuildTools.run(state, tool, args).merge
+
+  /**
+   * The structured build tools' entry point (MCP handler threads). Settings-only tools
+   * answer from the loaded State when the loop is busy, so they never wait behind a
+   * build; everything else is queued onto the command loop like `sbt-task`.
+   */
+  private def runBuildTool(tool: String, args: Map[String, List[String]]): String =
+    currentState.get match {
+      case None => s"$tool: build not loaded yet"
+      case Some(state) if McpBuildTools.SettingsOnly(tool) && sbt.McpInProcess.isBusy =>
+        buildToolOnLoop(state, tool, args)
+      case Some(_) =>
+        val id      = "mcp-tool-" + UUID.randomUUID().toString
+        val promise = Promise[String]()
+        pendingBuildTools.put(id, (tool, args, promise))
+        if (!sbt.McpInProcess.enqueue(s"$BuildToolCmd $id", id)) {
+          pendingBuildTools.remove(id)
+          s"$tool: no sbt channel available yet (is an sbt session attached?)"
+        } else
+          try Await.result(promise.future, CommandWait)
+          catch {
+            case _: TimeoutException =>
+              pendingBuildTools.remove(id)
+              s"$tool: timed out (still queued behind a long-running command?)"
+          }
     }
 
   /**
@@ -559,7 +614,17 @@ object SbtMcpPlugin extends AutoPlugin {
     // log `sbt-task` returns. Log each failed test's name and message through sbt's
     // logger while an `sbt-task` runs, so the response says which assertion failed.
     Test / testListeners += new McpTestFailureListener(state.value.log),
-  )
+  ) ++ Seq(Compile, Test).flatMap { configuration =>
+    // The structured `compile` / `test` tools return compiler diagnostics as data: wrap
+    // sbt's reporter so every problem is also recorded (only while such a tool runs).
+    inConfig(configuration)(
+      Seq(
+        compile / compilerReporter := Def.uncached {
+          new McpRunRecorder.RecordingReporter((compile / compilerReporter).value)
+        }
+      )
+    )
+  }
 
   /**
    * Start the single MCP server iff enabled and not already running. The
@@ -593,6 +658,7 @@ object SbtMcpPlugin extends AutoPlugin {
           () => taskInfos(currentState.get),
           docsUrl,
           (files, content, scope) => runCheck(files, content, scope),
+          (tool, args) => runBuildTool(tool, args),
         )
         serverHandle.set(Some(handle))
         state.log.info(
