@@ -39,6 +39,8 @@ plugin auto-triggers on this JVM project.
    - `glob-search` `{ "query": "Widget", "inPackage": "example" }`
    - `inspect` `{ "symbol": "example.Main" }` (or `example.Widget`)
    - `list-tasks` `{}` (or `{ "task": "compile" }` for one task's help)
+   - `compile` `{}`, `test` `{ "full": true }`, `run` `{ "args": ["a"] }`,
+     `projects` `{}`, `show` `{ "key": "scalaVersion" }` — structured results
    - `sbt-task` `{ "command": "compile" }` or `{ "command": "test" }`
      — queued onto sbt's command loop and run there. It works even while a
      `~` watch is running (it runs between the watch's triggers).

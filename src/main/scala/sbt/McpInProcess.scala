@@ -100,6 +100,17 @@ object McpInProcess {
 
   private final val MaxQueuedCommands = 1000
 
+  /**
+   * Run `body` (ON the loop) and return its result with the console output it logged,
+   * read from the global log file like [[runOnLoop]] does for a command line.
+   */
+  def captureLog[A](state: State)(body: => A): (A, String) = {
+    val logFile = state.globalLogging.backing.file
+    val start   = if (logFile.isFile) logFile.length else 0L
+    val result  = body
+    (result, readDelta(logFile, start))
+  }
+
   private def isFailure(state: State): Boolean =
     state.next match {
       case ret: State.Return =>

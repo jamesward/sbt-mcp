@@ -12,7 +12,7 @@ import java.net.ServerSocket
 import java.nio.file.Files
 
 // Eval integration tests: when an agent is asked to compile the project or run
-// its tests, does it use sbt-mcp's `sbt-task` tool rather than invoke the sbt CLI?
+// its tests, does it use sbt-mcp's tools (`compile` / `test` / `sbt-task`) rather than invoke the sbt CLI?
 //
 // The two prompt scenarios each run against real Claude and Kiro CLI agents. Each
 // model-backed test makes one PAID model call when its CLI is installed and
@@ -24,10 +24,10 @@ import java.nio.file.Files
 // Each agent is given BOTH a shell (Claude `Bash`; Kiro `execute_bash`) AND the
 // sbt-mcp MCP server, so it must genuinely choose how to drive the build. Benign
 // shell use (e.g. `ls`) is allowed; invoking `sbt`, `./sbt`, or `sbtn` in that shell
-// fails the eval. A passing Claude arm proves its ToolCalled check passed, its
-// transcript contains `sbt-task`, and no Bash event invokes the sbt CLI. A passing
-// Kiro arm proves its rendered tool trace contains an sbt-mcp `sbt-task` call and no
-// execute_bash block invokes the sbt CLI. The Claude judge is deliberately a no-op
+// fails the eval. A passing Claude arm proves its transcript contains an sbt-mcp
+// build-driving tool call (`compile`, `test` or `sbt-task`) and no Bash event invokes
+// the sbt CLI. A passing Kiro arm proves the same from its rendered tool trace (an
+// sbt-mcp call, and no execute_bash block invoking the sbt CLI). The Claude judge is deliberately a no-op
 // and is NOT evidence of semantic answer correctness.
 object SbtMcpEvalSpec extends ZIOSpecDefault:
 
@@ -49,6 +49,21 @@ object SbtMcpEvalSpec extends ZIOSpecDefault:
     else if c.endsWith("reloadStatus") then "[ok] " + c + "\n[info] No reload needed."
     else s"[ok] $c"
 
+  // Stubs for the structured `compile` / `test` tools (same JSON shape the plugin returns).
+  private def fakeBuildTool(tool: String, args: Map[String, List[String]]): String =
+    val common =
+      s""""command":"$tool","success":true,"elapsedMs":1000,"errorCount":0,"warningCount":0,"problems":[],""" +
+        """"log":"[success] Total time: 1 s","logTruncated":false"""
+    tool match
+      case "compile" => s"{$common}"
+      case "test" =>
+        s"""{$common,"summary":{"total":3,"passed":3,"failed":0,"errors":0,"skipped":0,"suites":1},""" +
+          """"failures":[],"suiteErrors":[]}"""
+      case other => s"$other: not available in this eval"
+
+  // The sbt-mcp tools that drive the build: `sbt-task`, or the structured `compile` / `test`.
+  private val buildDrivingTools = List("sbt-task", "sbt_task", "compile", "test")
+
   private def freePort: Task[Int] =
     ZIO.attempt {
       val s = ServerSocket(0)
@@ -68,7 +83,8 @@ object SbtMcpEvalSpec extends ZIOSpecDefault:
 
   private def usedMcpTool(events: List[TranscriptEvent]): Boolean =
     events.exists {
-      case TranscriptEvent.ToolCall(n, _) => n.contains("sbt-task") || n.contains("sbt_task")
+      case TranscriptEvent.ToolCall(n, _) =>
+        n.startsWith("mcp__sbtmcp__") && buildDrivingTools.exists(t => n == s"mcp__sbtmcp__$t")
       case _                              => false
     }
 
@@ -102,11 +118,11 @@ object SbtMcpEvalSpec extends ZIOSpecDefault:
   // lines whose Kiro metadata identifies a shell tool, so answer text that merely
   // mentions `./sbt` cannot become a false positive.
   private val ansiControl = "\u001B\\[[0-?]*[ -/]*[@-~]".r
-  private val kiroLegacyMcpCall = """(?i)Running tool sbt-task\b[^\n]*from mcp server:\s*sbtmcp""".r
+  private val kiroLegacyMcpCall = """(?i)Running tool (?:sbt-task|compile|test)\b[^\n]*from mcp server:\s*sbtmcp""".r
   private val kiroLegacyShellBlock =
     """(?is)Running tool (?:execute_bash|shell|bash)\b(.*?)(?=\n\s*-\s*(?:Completed|Failed)|\z)""".r
   private val kiroAcpMcpCall =
-    "(?i)\"toolName\"\\s*:\\s*\"sbt-task\"\\s*,\\s*\"mcpServerName\"\\s*:\\s*\"sbtmcp\"".r
+    "(?i)\"toolName\"\\s*:\\s*\"(?:sbt-task|compile|test)\"\\s*,\\s*\"mcpServerName\"\\s*:\\s*\"sbtmcp\"".r
   private val kiroAcpShellCall =
     "(?i)\"toolName\"\\s*:\\s*\"(?:execute_bash|shell|bash)\"".r
 
@@ -145,6 +161,7 @@ object SbtMcpEvalSpec extends ZIOSpecDefault:
                              refresh    = () => None,
                              listTasks  = () => List("compile" -> "Compiles sources", "test" -> "Runs the tests"),
                              docsUrl    = None,
+                             buildTool  = fakeBuildTool,
                            ))
                          )(h => ZIO.attempt(h.close()).ignoreLogged)
                     _ <- ZIO.sleep(1.second)
@@ -256,7 +273,7 @@ object SbtMcpEvalSpec extends ZIOSpecDefault:
     test("Claude compile prompt uses the sbt-mcp tool, not the sbt CLI") {
       runToolChoiceEval(
         task     = compileTask,
-        criteria = "The project is compiled by calling the sbt-mcp `sbt-task` tool, not by running the sbt CLI in a shell.",
+        criteria = "The project is compiled by calling an sbt-mcp tool (`compile` or `sbt-task`), not by running the sbt CLI in a shell.",
       )
     } @@ CliTestGates.ifClaudeAvailable,
     // Regression eval for an observed behavior: on a "run the tests (and fix
@@ -269,7 +286,7 @@ object SbtMcpEvalSpec extends ZIOSpecDefault:
       runToolChoiceEval(
         task = testSuiteTask,
         criteria =
-          "The tests are run by calling the sbt-mcp `sbt-task` tool (e.g. command \"test\"), " +
+          "The tests are run by calling an sbt-mcp tool (`test`, or `sbt-task` with command \"test\"), " +
             "NOT by running the sbt CLI (`./sbt test` / `sbt test`) in a shell.",
       )
     } @@ CliTestGates.ifClaudeAvailable,
@@ -298,6 +315,7 @@ object SbtMcpEvalSpec extends ZIOSpecDefault:
                              refresh    = () => None,
                              listTasks  = () => List("compile" -> "Compiles sources", "test" -> "Runs the tests"),
                              docsUrl    = None,
+                             buildTool  = fakeBuildTool,
                            ))
                          )(h => ZIO.attempt(h.close()).ignoreLogged)
                     // Give the daemon server a moment to bind the port.
@@ -310,7 +328,8 @@ object SbtMcpEvalSpec extends ZIOSpecDefault:
                     spec0 = EvalSpec(
                               task     = task,
                               criteria = criteria,
-                              checks   = List(EvalCheck.ToolCalled("sbt-task")),
+                              // Any build-driving sbt-mcp tool counts (checked by usedMcpTool below).
+                              checks   = Nil,
                             )
                     arm   = EvalArm.mcp("sbtmcp", "Agent with sbt-mcp", List(McpServerConfig("sbtmcp", s"http://127.0.0.1:$port/")))
                     rs   <- EvalRunner.run(spec0, List(arm), List("claude-sonnet-4-6"), samples = 1, agent, noOpJudge)

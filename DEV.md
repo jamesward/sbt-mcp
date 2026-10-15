@@ -108,6 +108,35 @@ meta-build classloader.
   State captured on load — no command executed. Per-task detail (`task` arg) runs
   `help <task>` via `sbt-task`.
 
+- **Structured build tools are hand-written, not generated per task.** `compile`,
+  `test`, `run`, `clean`, `publish-local`, `projects`, `test-names`, `main-classes`,
+  `dependencies` and `show` each have a typed input and output case class in
+  `src/isolated-runtime/.../BuildTools.scala` (zio-schema derives the `inputSchema` /
+  `outputSchema`, with `@description`s). Generating a tool per sbt key was rejected:
+  input-task arguments are sbt `Parser`s (no JSON schema), result types are erased
+  (`KeyTag.typeArg`), and a real build has hundreds of keys. `sbt-task` stays the
+  escape hatch for everything else.
+  - **Bridge.** One `buildTool(name, Map[String, List[String]]) => String` callback.
+    The plugin (`McpBuildTools`) returns a JSON object, or an error message that never
+    starts with `{` (reported as `isError`). The isolated side decodes the JSON into the
+    output case class, re-encodes it without `null`s (zio-schema writes `None` as
+    `null`, which the schema doesn't allow) and returns it as `structuredContent`.
+  - **Execution.** Calls are queued onto the command loop (`mcpBuildToolInternal <id>`),
+    like `sbt-task`. `projects` reads settings only and answers from the loaded State
+    when the loop is busy. Actions (`compile`, `test`, `clean`, `publish-local`) run a
+    command line through `runForTool`, so they keep sbt's aggregation and log capture;
+    queries use `Extracted.runTask`. `run` forks the main class itself (the project's
+    `run / forkOptions`, `Runtime / fullClasspath`, stdin disconnected, output logged),
+    because sbt's `run` connects stdin and sends a forked program's output to the
+    server's stdout, where it can't be captured.
+  - **Diagnostics and test results as data.** `McpRunRecorder` is active only while a
+    structured tool runs. The plugin wraps `Compile`/`Test` `compile / compilerReporter`
+    (re-exported from `private[sbt]` by `sbt.McpKeys`) to record every problem, and
+    `McpTestFailureListener` records every test event. sbt 2 caches a failed compile and
+    replays it without calling the reporter, so after a failure with no recorded error
+    the compiles involved are re-requested (cache hits) and the problems read from the
+    `xsbti.CompileFailed` they throw.
+
 - **Documentation tools are proxied.** `McpServerRuntimeImpl.ProxyToolSource` implements
   zio-http-mcp's `McpToolSource`: its `listTools` connects to the upstream MCP server
   (`mcpDocsUrl`, default javadocs.dev) and merges those tools into `tools/list`, and
@@ -170,6 +199,7 @@ meta-build classloader.
 |---------|-------|
 | Plugin, lifecycle, command registration, refresh orchestration | `SbtMcpPlugin` |
 | Isolated MCP server facade / child implementation | `McpServerRuntime`; `McpServerRuntimeImpl`, `IsolatedMcpBridge` under `src/isolated-runtime` |
+| Structured build tools: schemas / implementation / recording | `BuildTools` (isolated); `McpBuildTools`, `McpRunRecorder`, `sbt.McpKeys` |
 | In-process command execution / output capture / failure detection | `sbt.McpInProcess` (package `sbt`) |
 | `check`: module settings, sessions, changed-sibling detection, rendering | `SbtMcpPlugin` (settings/owner resolution), `ModuleCheck`, `IsolatedCheck`; embedded `src/isolated-check`: `IsolatedCheckBridge` |
 | tasty-query isolation + index + symbol operations | Parent: `IsolatedSymbolIndex`, `SymbolIndexState`; embedded `src/isolated-symbol`: `IsolatedSymbolBridge`, `LazyClasspath`, `SymbolIndex` |
@@ -225,9 +255,17 @@ the real sbt session). See [`test-project/README.md`](test-project/README.md).
 Under `src/sbt-test/server/`, run with `sbt scripted` or `sbt 'scripted server/<name>'`:
 
 - **`tools`** — applies the plugin with the server enabled, connects with
-  zio-http-mcp's `McpClient`, and asserts `listTools` advertises all five tools and
+  zio-http-mcp's `McpClient`, and asserts `listTools` advertises the built-in tools and
   that `inspect` / `glob-search` / `list-tasks` read the project's TASTy. Also checks
   the in-process command primitive (`compile` succeeds, a bogus command fails).
+- **`build-tools`** — an aggregate (`root` → `core`, `app` dependsOn `core`) with ZIO
+  tests. Calls every structured build tool on the loop (`SbtMcpPlugin.buildToolOnLoop`)
+  and asserts its JSON: projects/aggregation, compile diagnostics (file, line, column)
+  including a repeated (cached) failing compile, passing and failing test results,
+  `run` output with arguments containing spaces/`;`/quotes, dependencies, `show` of
+  settings and tasks, `publish-local` coordinates (into a test-local Ivy home), and
+  request errors. The forked harness checks the advertised input/output schemas and
+  annotations, and calls `projects` over HTTP while the loop is busy.
 - **`compile-output`** — three compile variants (success / warning / failure), plus multi-command lines (every part runs; a failure stops the rest);
   asserts `sbt-task` captures the exhaustivity **warning**, the type **error**, and a
   clean **success**, and that failures are reported as `[error]` (not `[ok]`).
@@ -293,10 +331,11 @@ kiro-cli tests are marked ignored when kiro-cli is unavailable or unauthenticate
 ```
 
 `SbtMcpEvalSpec` runs the compile and test-suite tool-choice scenarios against both
-Claude and Kiro CLI, with each agent given a shell and sbt-mcp. It allows benign
-shell use but fails if the shell invokes `sbt`, `./sbt`, or `sbtn`. Its Claude judge
-is intentionally a no-op to avoid a second model call; pass/fail is based on the
-deterministic `ToolCalled("sbt-task")` check plus transcript/tool-trace inspection.
+Claude and Kiro CLI, with each agent given a shell and sbt-mcp (with stubbed `sbt-task`,
+`compile` and `test`). It allows benign shell use but fails if the shell invokes `sbt`,
+`./sbt`, or `sbtn`. Its Claude judge is intentionally a no-op to avoid a second model
+call; pass/fail is based on transcript/tool-trace inspection: an sbt-mcp `compile`,
+`test` or `sbt-task` call, and no sbt CLI in the shell.
 Each available/authenticated provider makes two paid calls; unavailable providers'
 model-backed tests are marked ignored.
 

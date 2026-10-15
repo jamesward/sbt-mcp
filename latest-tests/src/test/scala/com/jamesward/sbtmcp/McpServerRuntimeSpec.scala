@@ -148,4 +148,69 @@ object McpServerRuntimeSpec extends ZIOSpecDefault:
                     .ensuring(closeWithin(handle).ignore)
       yield result
     },
+    test("structured build tools: arguments cross as strings, results are validated and returned without nulls") {
+      val seen = AtomicReference[(String, Map[String, List[String]])]()
+      val compileJson =
+        """{"command":"core/Test/compile","success":false,"elapsedMs":12,"errorCount":1,"warningCount":0,""" +
+          """"problems":[{"severity":"error","file":"core/A.scala","line":3,"column":4,"message":"boom"}],""" +
+          """"log":"[error] boom","logTruncated":false,"error":"command failed"}"""
+      val buildTool: (String, Map[String, List[String]]) => String = (tool, args) => {
+        seen.set(tool -> args)
+        tool match
+          case "compile" => compileJson
+          case "projects" => """{"projects":[]}""" // missing the required `currentProject`
+          case "show" => """{"key":"x","kind":"task","valueType":"scala.Option","value":"None","json":null}"""
+          case other => s"$other: unknown project 'nope'"
+      }
+      for
+        port   <- freePort
+        handle <- ZIO.attempt(McpServerRuntime.start(
+                    host = Host, port = port, runCommand = c => s"[ok] $c", refresh = () => None,
+                    listTasks = () => Nil, docsUrl = None, buildTool = buildTool,
+                  ))
+        result <- ZIO
+                    .scoped {
+                      McpClient.connect(s"http://$Host:$port/").flatMap { client =>
+                        for
+                          tools    <- client.listTools
+                          compiled <- client.callTool(
+                                        "compile",
+                                        Json.Obj("project" -> Json.Str("core"), "configuration" -> Json.Str("test")),
+                                      )
+                          compiledArgs = seen.get()
+                          tested <- client.callTool(
+                                      "test",
+                                      Json.Obj("tests" -> Json.Arr(Json.Str("a.B"), Json.Str("c.*")), "full" -> Json.Bool(true)),
+                                    )
+                          testedArgs = seen.get()
+                          invalid <- client.callTool("projects", Json.Obj())
+                          shown   <- client.callTool("show", Json.Obj("key" -> Json.Str("x")))
+                          badEnum <- client.callTool("compile", Json.Obj("configuration" -> Json.Str("it")))
+                        yield
+                          val names = tools.map(_.name.toString).toSet
+                          assertTrue(
+                            Set("compile", "test", "run", "clean", "publish-local", "projects", "test-names",
+                              "main-classes", "dependencies", "show", "sbt-task", "list-tasks").subsetOf(names),
+                            tools.filter(t => Set("compile", "test", "show").contains(t.name.toString)).forall(_.outputSchema.isDefined),
+                            compiledArgs == ("compile" -> Map("project" -> List("core"), "configuration" -> List("test"))),
+                            !compiled.isError.contains(true),
+                            compiled.structuredContent.map(_.toString).contains(
+                              zio.json.ast.Json.decoder.decodeJson(compileJson).toOption.get.toString
+                            ),
+                            testedArgs == ("test" -> Map("tests" -> List("a.B", "c.*"), "full" -> List("true"))),
+                            tested.isError.contains(true),
+                            tested.content.toString.contains("test: unknown project 'nope'"),
+                            invalid.isError.contains(true),
+                            invalid.content.toString.contains("unexpected result"),
+                            !shown.isError.contains(true),
+                            // Absent optional values are omitted, never `null` (the output schema forbids it).
+                            shown.structuredContent.exists(j => !j.toString.contains("null") && !j.toString.contains("json")),
+                            badEnum.isError.contains(true),
+                          )
+                      }
+                    }
+                    .provide(Client.default)
+                    .ensuring(closeWithin(handle).ignore)
+      yield result
+    },
   ) @@ TestAspect.withLiveClock @@ TestAspect.sequential

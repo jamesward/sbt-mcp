@@ -4,11 +4,34 @@
 
 An **opt-in, off-by-default** [Model Context Protocol](https://modelcontextprotocol.io/)
 server embedded in an sbt 2.x build. When enabled, it starts an MCP server inside the sbt
-JVM and exposes tools an AI agent can call:
+JVM and exposes tools an AI agent can call.
+
+Structured build tools return JSON (`structuredContent`) that matches each tool's
+declared `outputSchema`, and take typed, validated arguments:
+
+| Tool            | What it does                                                               |
+|-----------------|----------------------------------------------------------------------------|
+| `compile`       | Compile (`configuration`: `compile`/`test`); compiler errors and warnings as `{severity, file, line, column, message}` |
+| `test`          | Run tests (incremental by default, `full` for all, `tests` for specific classes/globs, `frameworkArgs`); pass/fail counts and each failure's suite, test and message |
+| `run`           | Run a main class (forked, stdin disconnected) with `args`; returns the program's `output` |
+| `clean`         | Delete build outputs                                                       |
+| `publish-local` | Publish to the local Ivy repository; returns the published coordinates     |
+| `projects`      | The build's projects: ids, base dirs, versions, Scala version, aggregation, `dependsOn` (answers even while sbt is busy) |
+| `test-names`    | Test classes per project, for `test`'s `tests`                             |
+| `main-classes`  | Main classes per project and the one `run` uses                            |
+| `dependencies`  | Declared, resolved (direct/transitive) and evicted library dependencies    |
+| `show`          | A setting's value, or a task's result, as text and JSON                    |
+
+The action tools (`compile`, `test`, `clean`, `publish-local`) take an optional
+`project` and, like the sbt shell, also run on the projects it aggregates. Every action
+result has `command`, `success`, `elapsedMs`, `errorCount`, `warningCount`,
+`problems`, and the captured `log`.
+
+General and code tools:
 
 | Tool          | What it does                                                                 |
 |---------------|------------------------------------------------------------------------------|
-| `sbt-task`    | Run an sbt command/task (works during a `~` watch); returns `[ok]`/`[error]` + captured compiler output, and each failed test's name and assertion message |
+| `sbt-task`    | Run any other sbt command/task (works during a `~` watch); returns `[ok]`/`[error]` + captured compiler output, and each failed test's name and assertion message |
 | `list-tasks`  | List the build's tasks/settings with descriptions (optional `all` flag; per-task `help` via `task`) |
 | `glob-search` | Search Scala 3 symbols by name (TASTy); `query:"*"` + `inPackage` lists ALL symbols in a package |
 | `inspect`     | List a symbol's members and (approximate) signatures (TASTy)                 |
@@ -60,7 +83,7 @@ Point an MCP client (Claude Code, Cursor, etc.) at `http://127.0.0.1:5010/`.
 `mcpInstall` prints copy-pasteable onboarding for an AI agent: how to register this
 server in the local MCP client config (Kiro / Claude Code / Cursor) using the
 configured host/port, and the `AGENTS.md` usage guidance to adopt (drive sbt through
-the `sbt-task` tool, use `glob-search` / `inspect` / `symbol-location` for symbols).
+the `compile` / `test` / … tools and `sbt-task`, use `glob-search` / `inspect` / `symbol-location` for symbols).
 It is deliberately non-mutating: it does not inspect or edit existing config, so
 reconcile any existing key that uses the same URL manually. The generated HTTP
 client timeout is 30 minutes, matching the server-side task wait.
@@ -95,7 +118,7 @@ stops its embedded server; keep a long-lived sbt session loaded while clients us
 - **Stale-index note.** If the project doesn't currently compile, the symbol tools
   still answer from the last successful compile and append a
   `(note: the project does not currently compile …)` line — a signal to fix the
-  build (e.g. via `sbt-task`) before new symbols will appear.
+  build (e.g. via the `compile` tool) before new symbols will appear.
 - **Fast checks while editing.** `check` validates Scala 3 sources without
   compiling, typically in a few hundred milliseconds:
   `{"files":["app/src/main/scala/app/Service.scala"]}`. It runs the module's own
@@ -112,11 +135,21 @@ stops its embedded server; keep a long-lived sbt session loaded while clients us
     an API to find breakage in the files that *use* it.
   - Upstream modules are compiled as needed so their current API is visible; if one
     doesn't compile, its last compiled classes are used (with a note).
-  - Still run `compile` / `test` via `sbt-task` before finishing: downstream modules,
+  - Still run `compile` / `test` before finishing: downstream modules,
     Java sources, and code generation are only covered by a real build.
-- **Running tasks.** `sbt-task` (e.g. `{"command":"compile"}`, `{"command":"test"}`,
-  `{"command":"testOnly com.example.MySpec"}`) runs on sbt's command loop and works
-  even while a `~` watch is active. It returns status, elapsed milliseconds, and
+- **Building and testing.** `compile` and `test` return diagnostics and test results
+  as data, e.g. `{"project":"core","configuration":"test"}` or
+  `{"tests":["com.example.MySpec"]}`. They run on sbt's command loop like `sbt-task`
+  (so they work during a `~` watch and wait behind a running command). Notes:
+  - `test` without arguments is sbt 2's incremental `test`: only tests that failed
+    before, haven't run, or whose code changed. Pass `"full":true` to run all.
+  - Compiles are incremental, so warnings in unchanged files aren't reported again.
+  - `column` is 0-based, as sbt prints it.
+  - `show` runs the task it is given (with its side effects) and doesn't aggregate.
+    Input tasks (`testOnly`, `runMain`, …) aren't supported by `show`; use `sbt-task`.
+- **Running other tasks.** `sbt-task` (e.g. `{"command":"reload"}`,
+  `{"command":"scalafmtAll"}`, `{"command":"clean; compile"}`) runs any command line on
+  sbt's command loop and works even while a `~` watch is active. It returns status, elapsed milliseconds, and
   either captured compiler output or an explicit `captured output: empty` marker.
   It needs an sbt session attached; if another command is running it waits its turn.
 
@@ -148,7 +181,7 @@ across subprojects — it prints one status line even on an aggregating root.
   not bind when `CI` is truthy or Heroku provides a nonblank `SOURCE_VERSION`, unless
   `mcpDisableInCI := false`.
 - **Loopback only.** Binds `127.0.0.1`. Do **not** set `mcpHost` to `0.0.0.0`.
-- **No auth yet, and `sbt-task` can run arbitrary tasks** — treat the endpoint as a
+- **No auth yet, and `sbt-task`, `run` and `show` can run arbitrary code** — treat the endpoint as a
   local, dev-only RCE surface. `zio-http-mcp` supports OAuth/token auth (`McpAuth`);
   wire it in before any non-loopback use.
 - **Outbound proxy.** When enabled, tool listing/calls make an outbound request to
@@ -165,7 +198,7 @@ across subprojects — it prints one status line even on an aggregating root.
 - **Symbol tools return nothing / say "not available".** The project must compile so
   its `.tasty` exists. If it doesn't compile, the tools answer from the last good
   compile and append a `(note: the project does not currently compile …)` line — fix
-  the build (e.g. `sbt-task {"command":"compile"}`) and query again.
+  the build (e.g. `compile` tool) and query again.
 - **Tools change after editing the build/plugin.** When consuming the plugin from
   source, `reload` (or restart sbt) to recompile it, then reconnect the client.
 

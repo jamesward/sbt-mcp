@@ -15,7 +15,10 @@ import scala.jdk.OptionConverters.*
  * sbt-mcp — an opt-in (default OFF) MCP server embedded in the sbt JVM.
  *
  * It exposes these tools over MCP (see [[McpServerRuntime]]):
- *   - `sbt-task`   : run an sbt command/task in the running sbt server
+ *   - structured build tools (`compile`, `test`, `run`, `clean`, `publish-local`,
+ *     `projects`, `test-names`, `main-classes`, `dependencies`, `show`): typed
+ *     arguments, JSON results (see [[McpBuildTools]])
+ *   - `sbt-task`   : run any sbt command/task in the running sbt server
  *   - `list-tasks` : list the build's tasks/settings
  *   - `glob-search`: search Scala 3 symbols by name (tasty-query backed)
  *   - `inspect`    : list a symbol's members/signatures (tasty-query backed)
@@ -94,6 +97,12 @@ object SbtMcpPlugin extends AutoPlugin {
     new ConcurrentHashMap[String, (ProjectRef, Configuration, Promise[Either[String, ModuleCheck.ModuleConfig]])]()
   private final val CheckConfigCmd = "mcpCheckConfigInternal"
 
+  // In-flight structured build-tool calls (`compile`, `test`, …), keyed by execId: the
+  // tool name, its arguments, and the promise the loop-side command completes.
+  private val pendingBuildTools =
+    new ConcurrentHashMap[String, (String, McpBuildTools.Args, Promise[String])]()
+  private final val BuildToolCmd = "mcpBuildToolInternal"
+
   // Last computed configuration per (project id, configuration name), used when the
   // command loop is busy (e.g. mid-compile) so `check` never has to wait behind it.
   private val checkConfigs = new ConcurrentHashMap[(String, String), ModuleCheck.ModuleConfig]()
@@ -116,6 +125,8 @@ object SbtMcpPlugin extends AutoPlugin {
     commands += mcpRefreshCommand,
     // `mcpCheckConfigInternal <id>` computes a module's `check` configuration on the loop.
     commands += mcpCheckConfigCommand,
+    // `mcpBuildToolInternal <id>` runs one structured build tool (compile, test, …) on the loop.
+    commands += mcpBuildToolCommand,
     onLoad := { (s: State) =>
       val s1 = onLoad.value(s) // run the previously-registered onLoad first
       currentState.set(Some(s1))
@@ -151,6 +162,53 @@ object SbtMcpPlugin extends AutoPlugin {
           // back into the loop.
           state
       }
+    }
+
+  /**
+   * Command that runs one queued structured build tool ([[McpBuildTools]]) ON the
+   * command loop and completes its promise with the JSON result (or an error message).
+   * Like `mcpExec`, it returns the loop's original state.
+   */
+  private def mcpBuildToolCommand: Command =
+    Command.single(BuildToolCmd) { (state, id) =>
+      Option(pendingBuildTools.remove(id)).foreach { case (tool, args, promise) =>
+        promise.trySuccess(buildToolOnLoop(state, tool, args))
+      }
+      state
+    }
+
+  /**
+   * Run a structured build tool against `state` ON the command loop (from the internal
+   * command, or directly from a build's own command, e.g. in scripted tests). Returns the
+   * tool's JSON object, or an error message (which never starts with `{`).
+   */
+  def buildToolOnLoop(state: State, tool: String, args: Map[String, List[String]]): String =
+    McpBuildTools.run(state, tool, args).merge
+
+  /**
+   * The structured build tools' entry point (MCP handler threads). Settings-only tools
+   * answer from the loaded State when the loop is busy, so they never wait behind a
+   * build; everything else is queued onto the command loop like `sbt-task`.
+   */
+  private def runBuildTool(tool: String, args: Map[String, List[String]]): String =
+    currentState.get match {
+      case None => s"$tool: build not loaded yet"
+      case Some(state) if McpBuildTools.SettingsOnly(tool) && sbt.McpInProcess.isBusy =>
+        buildToolOnLoop(state, tool, args)
+      case Some(_) =>
+        val id      = "mcp-tool-" + UUID.randomUUID().toString
+        val promise = Promise[String]()
+        pendingBuildTools.put(id, (tool, args, promise))
+        if (!sbt.McpInProcess.enqueue(s"$BuildToolCmd $id", id)) {
+          pendingBuildTools.remove(id)
+          s"$tool: no sbt channel available yet (is an sbt session attached?)"
+        } else
+          try Await.result(promise.future, CommandWait)
+          catch {
+            case _: TimeoutException =>
+              pendingBuildTools.remove(id)
+              s"$tool: timed out (still queued behind a long-running command?)"
+          }
     }
 
   /**
@@ -559,7 +617,17 @@ object SbtMcpPlugin extends AutoPlugin {
     // log `sbt-task` returns. Log each failed test's name and message through sbt's
     // logger while an `sbt-task` runs, so the response says which assertion failed.
     Test / testListeners += new McpTestFailureListener(state.value.log),
-  )
+  ) ++ Seq(Compile, Test).flatMap { configuration =>
+    // The structured `compile` / `test` tools return compiler diagnostics as data: wrap
+    // sbt's reporter so every problem is also recorded (only while such a tool runs).
+    inConfig(configuration)(
+      Seq(
+        compile / sbt.McpKeys.compilerReporter := Def.uncached {
+          new McpRunRecorder.RecordingReporter((compile / sbt.McpKeys.compilerReporter).value)
+        }
+      )
+    )
+  }
 
   /**
    * Start the single MCP server iff enabled and not already running. The
@@ -593,6 +661,7 @@ object SbtMcpPlugin extends AutoPlugin {
           () => taskInfos(currentState.get),
           docsUrl,
           (files, content, scope) => runCheck(files, content, scope),
+          (tool, args) => runBuildTool(tool, args),
         )
         serverHandle.set(Some(handle))
         state.log.info(
@@ -743,17 +812,21 @@ object SbtMcpPlugin extends AutoPlugin {
         |
         |## Build, Test & Dev Workflow
         |
-        |- Use the MCP server named `$serverName` for ALL sbt interactions. Run
-        |  commands/tasks through its `sbt-task` tool; use `list-tasks` to discover
-        |  tasks/settings or get per-task help. Do not invoke `sbt`, a shell, or a
-        |  separate sbt client when the MCP tool is available. If the MCP server is
+        |- Use the MCP server named `$serverName` for ALL sbt interactions. Build,
+        |  test and run with its structured tools: `compile`, `test` (`tests` for
+        |  specific classes, `full` for all), `run`, `clean`, `publish-local`; inspect
+        |  the build with `projects`, `test-names`, `main-classes`, `dependencies` and
+        |  `show` (a setting or task value). They return errors, warnings and test
+        |  failures as data. Use `sbt-task` for any other command (e.g. `reload`) and
+        |  `list-tasks` to discover tasks. Do not invoke `sbt`, a shell, or a
+        |  separate sbt client when the MCP tools are available. If the MCP server is
         |  unavailable, state that clearly and use a direct CLI fallback only when
-        |  necessary. Separate multiple sbt commands with `;`.
+        |  necessary.
         |
         |- After editing Scala 3 sources, validate them with the `check` tool of
         |  `$serverName` (pass the edited files; it is a fast, compile-free type
-        |  check). Use `"scope":"module"` after changing an API. Run `compile`/`test`
-        |  through `sbt-task` before declaring the work done.
+        |  check). Use `"scope":"module"` after changing an API. Run the `compile`
+        |  and `test` tools before declaring the work done.
         |
         |- Use `$serverName` for Scala/classpath symbol work: `glob-search` to
         |  find/list symbols, `inspect` for members/signatures, and `symbol-location`

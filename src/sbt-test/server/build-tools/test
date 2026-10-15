@@ -1,0 +1,12 @@
+# Every structured build tool, called on the loop exactly as its MCP handler does.
+> mcpBuildToolsOk
+$ exists ivy-home/local/com.example/core_3/0.1.0
+-$ exists ivy-home/local/com.example/app_3
+
+# Compiler diagnostics come back as data; queries that need a compile report its errors.
+$ copy-file changes/Broken.scala core/src/main/scala/core/Broken.scala
+> mcpBuildToolsBroken
+$ delete core/src/main/scala/core/Broken.scala
+
+# Over HTTP: advertised input/output schemas, and `projects` answering while sbt is busy.
+> harness/run

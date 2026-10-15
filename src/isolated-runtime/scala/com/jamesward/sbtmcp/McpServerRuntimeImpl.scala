@@ -66,6 +66,7 @@ object McpServerRuntimeImpl {
       inspectSymbol: String => String,
       locateSymbol: String => String,
       check: (List[String], Option[String], Option[String]) => String,
+      buildTool: (String, Map[String, List[String]]) => String,
       docsUrl: Option[String],
   ): Handle = {
     // sbt 2.0.x puts slf4j-api 1.7.x in a parent classloader without a binding.
@@ -79,11 +80,13 @@ object McpServerRuntimeImpl {
       io.netty.util.internal.logging.JdkLoggerFactory.INSTANCE
     )
 
-    val base: McpServer[Any] =
+    val core: McpServer[Any] =
       McpServer("sbt-mcp", implementationVersion)
         .instructions(
-          "Tools for driving a Scala/sbt build: run sbt tasks, and search/inspect Scala 3 " +
-            "symbols read from TASTy, and `check` Scala 3 sources quickly without compiling. " +
+          "Tools for driving a Scala/sbt build. Structured build tools return data with an output schema: " +
+            "`compile`, `test`, `run`, `clean`, `publish-local`, `projects`, `test-names`, `main-classes`, " +
+            "`dependencies` and `show`. `sbt-task` runs any other sbt command (and `list-tasks` lists the tasks). " +
+            "Search/inspect Scala 3 symbols read from TASTy, and `check` Scala 3 sources quickly without compiling. " +
             "The symbol index refreshes automatically before each query. " +
             "Documentation tools are proxied from javadocs.dev."
         )
@@ -93,6 +96,7 @@ object McpServerRuntimeImpl {
         .tool(inspectTool(refresh, inspectSymbol))
         .tool(locationTool(refresh, locateSymbol))
         .tool(checkTool(check))
+    val base: McpServer[Any] = BuildTools.all(buildTool).foldLeft(core)(_.tool(_))
     // Proxy an upstream MCP server (javadocs.dev by default): its tools are merged
     // into tools/list, and any tools/call not matching our built-ins is forwarded.
     val withProxy: McpServer[Client] = docsUrl.filter(_.trim.nonEmpty) match {
@@ -191,14 +195,15 @@ object McpServerRuntimeImpl {
   private def sbtTaskTool(runCommand: String => String): McpToolHandler =
     McpTool("sbt-task")
       .description(
-        "Run an sbt command/task in this build and return its status plus the captured " +
+        "Run any sbt command/task in this build and return its status plus the captured " +
           "console output (compiler warnings and errors included). The command is queued onto " +
           "sbt's command loop (in-process — no separate sbt server connection) and runs there, " +
           "so it works even while a `~` watch is active (it runs between the watch's file-change " +
           "triggers, serialized with it). Every result includes elapsed milliseconds and either " +
           "captured console output or an explicit `captured output: empty` marker. Status is " +
-          "`[ok] <cmd>` or `[error] <cmd>: …`. Examples: `compile`, `test`, `myProject/compile`, " +
-          "`testOnly com.example.MySpec`, `clean`."
+          "`[ok] <cmd>` or `[error] <cmd>: …`. Prefer the structured tools (`compile`, `test`, `run`, " +
+          "`clean`, `publish-local`, `show`, …) where one fits: they return diagnostics and test results " +
+          "as data. Use this for anything else, e.g. `reload`, `set …`, `scalafmtAll`, command chains (`a; b`)."
       )
       // Running arbitrary sbt tasks can mutate the project and the world.
       .annotations(destructive = OptBool.True, openWorld = OptBool.True)

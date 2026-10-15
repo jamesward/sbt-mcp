@@ -30,6 +30,8 @@ TaskKey[Unit]("checkInstall", "Verify mcpInstall printed the expected instructio
     "mcpInstall did not print the AGENTS.md usage guidance")
   assert(txt.contains("`glob-search`") && txt.contains("`sbt-task`"),
     "mcpInstall did not mention the core tools")
+  assert(txt.contains("`compile`, `test`") && txt.contains("`projects`"),
+    "mcpInstall did not mention the structured build tools")
   assert(!txt.contains("sbt-mcp-sbt-mcp"),
     "mcpInstall produced a doubled `sbt-mcp-` server-name prefix")
 
