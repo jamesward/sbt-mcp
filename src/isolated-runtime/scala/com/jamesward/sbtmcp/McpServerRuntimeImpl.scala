@@ -8,6 +8,7 @@ import com.jamesward.ziohttp.mcp.client.{McpClient, McpClientConfig}
 import zio.*
 import zio.http.*
 import zio.http.netty.NettyConfig
+import zio.json.*
 import zio.json.ast.Json
 import zio.schema.{ DeriveSchema, Schema }
 
@@ -26,10 +27,14 @@ object McpServerRuntimeImpl {
   private val ShutdownWait = FiniteDuration(2, TimeUnit.SECONDS)
   private val StartupWait  = FiniteDuration(5, TimeUnit.SECONDS)
 
-  /** Opaque handle used by the plugin to stop the server on `onUnload`. */
+  /**
+   * Opaque handle used by the plugin to stop the server on `onUnload`. `socket` is the
+   * Unix domain socket served with the stdio framing, `port` the HTTP port (or -1).
+   */
   final case class Handle(
       host: String,
       port: Int,
+      socket: Option[java.nio.file.Path],
       private val shutdown: () => Unit,
       private val awaitTermination: Long => Boolean,
   ) {
@@ -55,7 +60,13 @@ object McpServerRuntimeImpl {
   final case class CheckArgs(files: List[String], content: Option[String] = None, scope: Option[String] = None)
   object CheckArgs { given Schema[CheckArgs] = DeriveSchema.gen[CheckArgs] }
 
+  /**
+   * Serve the tools on `socket` (the stdio transport's framing, one connection per
+   * client, see [[SocketListener]]) and, when `port` is positive, over Streamable HTTP
+   * on `host:port`. At least one of the two must be given.
+   */
   def start(
+      socket: Option[java.nio.file.Path],
       host: String,
       port: Int,
       implementationVersion: String,
@@ -80,6 +91,108 @@ object McpServerRuntimeImpl {
       io.netty.util.internal.logging.JdkLoggerFactory.INSTANCE
     )
 
+    val base: McpServer[Any] = builtIns(
+      implementationVersion, runCommand, refresh, listTasks, globSearch, inspectSymbol, locateSymbol, check, buildTool,
+    )
+    // Proxy an upstream MCP server (javadocs.dev by default): its tools are merged
+    // into tools/list, and any tools/call not matching our built-ins is forwarded.
+    val withProxy: McpServer[Client] = docsUrl.filter(_.trim.nonEmpty) match {
+      case Some(u) => base.toolSource(new ProxyToolSource(u.trim))
+      case None    => base
+    }
+    serve(socket, host, port, withProxy.mountedAt("/"))
+  }
+
+  /**
+   * The answers the stdio launcher (`SbtMcpStdio.java`) gives while sbt is not
+   * running yet: `initialize` and `tools/list` for legacy clients, `server/discover`
+   * and `tools/list` for 2026-07-28 clients. They are the results of real requests
+   * to the built-in tools' server (no docs proxy, so no network and a stable
+   * listing), made in-process. The tool definitions don't depend on the build, so
+   * the snapshot only changes with the plugin version.
+   */
+  def snapshot(implementationVersion: String): String = {
+    val unavailable = "not available"
+    val server = builtIns(
+      implementationVersion,
+      _ => unavailable,
+      () => None,
+      () => Nil,
+      (_, _) => unavailable,
+      _ => unavailable,
+      _ => unavailable,
+      (_, _, _) => unavailable,
+      (_, _) => unavailable,
+    ).mountedAt("/")
+    val routes = server.statelessRoutes
+    val client = Json.Obj("name" -> Json.Str("sbt-mcp-stdio"), "version" -> Json.Str(implementationVersion))
+    val modernMeta = Json.Obj(
+      "_meta" -> Json.Obj(
+        McpMeta.ProtocolVersion    -> Json.Str(ProtocolVersion.latest.wire),
+        McpMeta.ClientCapabilities -> Json.Obj(),
+        McpMeta.ClientInfo         -> client,
+      )
+    )
+    def result(method: String, params: Json.Obj): ZIO[Any, Throwable, Json] = {
+      val body = Json.Obj(
+        "jsonrpc" -> Json.Str("2.0"),
+        "id"      -> Json.Num(1),
+        "method"  -> Json.Str(method),
+        "params"  -> params,
+      )
+      val request = Request
+        .post(URL.root, Body.fromString(body.toString))
+        .addHeader(Header.ContentType(MediaType.application.json))
+        .addHeader(Header.Accept(MediaType.application.json, MediaType.text.`event-stream`))
+      ZIO.scoped(for
+        response <- routes.runZIO(request)
+        text     <- response.body.asString
+        // A JSON body, or SSE `data:` lines (the last one carries the response).
+        json = text.linesIterator.map(_.trim).filter(_.startsWith("data:")).map(_.drop(5).trim).toList.lastOption
+                 .getOrElse(text)
+        parsed <- ZIO.fromEither(Json.decoder.decodeJson(json)).mapError(RuntimeException(_))
+        out    <- ZIO.fromOption(parsed.asObject.flatMap(_.get("result")))
+                    .orElseFail(RuntimeException(s"$method: no result in $text"))
+      yield out)
+    }
+    val effect =
+      for
+        initialize <- result(
+                        "initialize",
+                        Json.Obj(
+                          "protocolVersion" -> Json.Str(ProtocolVersion.latestLegacy.wire),
+                          "capabilities"    -> Json.Obj(),
+                          "clientInfo"      -> client,
+                        ),
+                      )
+        legacyTools <- result("tools/list", Json.Obj())
+        discover    <- result("server/discover", modernMeta)
+        modernTools <- result("tools/list", modernMeta)
+      yield Json.Obj(
+        "format"  -> Json.Num(1),
+        "version" -> Json.Str(implementationVersion),
+        "legacy"  -> Json.Obj("initialize" -> initialize, "tools/list" -> legacyTools),
+        "modern"  -> Json.Obj("server/discover" -> discover, "tools/list" -> modernTools),
+      )
+    val runtime = Unsafe.unsafe { implicit u => Runtime.unsafe.fromLayer(Runtime.removeDefaultLoggers) }
+    try
+      Unsafe.unsafe { implicit u =>
+        runtime.unsafe.run(effect).getOrThrowFiberFailure()
+      }.toJsonPretty + "\n"
+    finally Unsafe.unsafe { implicit u => runtime.unsafe.shutdown() }
+  }
+
+  private def builtIns(
+      implementationVersion: String,
+      runCommand: String => String,
+      refresh: () => Option[String],
+      listTasks: () => List[(String, String)],
+      globSearch: (String, Option[String]) => String,
+      inspectSymbol: String => String,
+      locateSymbol: String => String,
+      check: (List[String], Option[String], Option[String]) => String,
+      buildTool: (String, Map[String, List[String]]) => String,
+  ): McpServer[Any] = {
     val core: McpServer[Any] =
       McpServer("sbt-mcp", implementationVersion)
         .instructions(
@@ -96,17 +209,11 @@ object McpServerRuntimeImpl {
         .tool(inspectTool(refresh, inspectSymbol))
         .tool(locationTool(refresh, locateSymbol))
         .tool(checkTool(check))
-    val base: McpServer[Any] = BuildTools.all(buildTool).foldLeft(core)(_.tool(_))
-    // Proxy an upstream MCP server (javadocs.dev by default): its tools are merged
-    // into tools/list, and any tools/call not matching our built-ins is forwarded.
-    val withProxy: McpServer[Client] = docsUrl.filter(_.trim.nonEmpty) match {
-      case Some(u) => base.toolSource(new ProxyToolSource(u.trim))
-      case None    => base
-    }
-    val server: McpServer[Client] = withProxy.mountedAt("/")
+    BuildTools.all(buildTool).foldLeft(core)(_.tool(_))
+  }
 
-    val routes: Routes[Client, Response] = server.statelessRoutes
-
+  private def serve(socket: Option[java.nio.file.Path], host: String, port: Int, server: McpServer[Client]): Handle = {
+    require(socket.isDefined || port > 0, "neither a socket nor an HTTP port to serve on")
     // Embedded sbt servers are frequently torn down and rebound during `reload`.
     // Use zio-http's fast Netty shutdown profile so event-loop finalizers do not
     // impose the library defaults (2-second quiet period / 15-second timeout).
@@ -135,11 +242,17 @@ object McpServerRuntimeImpl {
     val runtime = Unsafe.unsafe { implicit u => Runtime.unsafe.fromLayer(quietLogging) }
     val started = scala.concurrent.Promise[Unit]()
     val serving =
-      (Server
-        .install(routes)
-        .tap(_ => ZIO.succeed(started.trySuccess(())).unit) *> ZIO.never)
-        .provide(serverLayer, Client.default)
-        .tapErrorCause(cause => ZIO.succeed(started.tryFailure(cause.squash)).unit)
+      ZIO.scoped {
+        for
+          client <- Client.default.build
+          _      <- ZIO.when(port > 0)(
+                      serverLayer.build.flatMap(http => Server.install(server.statelessRoutes).provideEnvironment(http ++ client))
+                    )
+          _      <- ZIO.foreachDiscard(socket)(path => SocketListener.serve(path, server.serveStream(_, _).provideEnvironment(client)))
+          _      <- ZIO.succeed(started.trySuccess(()))
+          _      <- ZIO.never
+        yield ()
+      }.tapErrorCause(cause => ZIO.succeed(started.tryFailure(cause.squash)).unit)
     val fiber = Unsafe.unsafe { implicit u => runtime.unsafe.fork(serving) }
     val closed        = AtomicBoolean(false)
     val runtimeClosed = AtomicBoolean(false)
@@ -173,7 +286,7 @@ object McpServerRuntimeImpl {
             Thread.currentThread().interrupt()
         ()
 
-    val handle = Handle(host, port, () => shutdown(), awaitTermination)
+    val handle = Handle(host, if port > 0 then port else -1, socket, () => shutdown(), awaitTermination)
     try
       // Do not publish a handle or log successful startup until zio-http has
       // installed the routes and bound the listener. Bind failures now surface

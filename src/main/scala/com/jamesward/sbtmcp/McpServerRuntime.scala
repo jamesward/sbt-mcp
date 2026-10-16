@@ -14,9 +14,11 @@ import scala.util.Using
   private final case class OwnedStartupFailure(cause: Throwable) extends RuntimeException(cause)
 object McpServerRuntime:
 
+  /** A running server: `socket` (stdio framing) and/or HTTP on `host:port` (`port` is -1 without HTTP). */
   final class Handle private[sbtmcp] (
       val host: String,
       val port: Int,
+      val socket: Option[Path],
       loader: URLClassLoader,
       bridge: Object,
       childHandle: Object,
@@ -27,6 +29,10 @@ object McpServerRuntime:
       loader.getParent eq ClassLoader.getPlatformClassLoader
     private val closed         = AtomicBoolean(false)
     private val cleanupStarted = AtomicBoolean(false)
+
+    /** The stdio launcher's snapshot, from this server's runtime (see [[McpServerRuntime.snapshot]]). */
+    def snapshot(): String =
+      withContextLoader(loader) { invoke(bridge, "snapshot", McpBuildInfo.version).asInstanceOf[String] }
 
     override def close(): Unit =
       if closed.compareAndSet(false, true) then
@@ -64,6 +70,11 @@ object McpServerRuntime:
         try loader.close()
         finally deleteRecursively(extractedDirectory)
 
+  /**
+   * Start the server: on `socket` (a Unix domain socket speaking the stdio transport's
+   * framing, which the stdio launcher connects to) when given, and over HTTP on
+   * `host:port` when `http`.
+   */
   def start(
       host: String,
       port: Int,
@@ -73,6 +84,8 @@ object McpServerRuntime:
       docsUrl: Option[String],
       check: (List[String], Option[String], Option[String]) => String = (_, _, _) => "check: not available",
       buildTool: (String, Map[String, List[String]]) => String = (tool, _) => s"$tool: not available (no loaded sbt build)",
+      socket: Option[Path] = None,
+      http: Boolean = true,
   ): Handle =
     val (loader, directory) = runtimeLoader()
     try
@@ -82,8 +95,9 @@ object McpServerRuntime:
         val startResult = invoke(
           bridge,
           "start",
+          socket.map(_.toString).orNull,
           host,
-          Int.box(port),
+          Int.box(if http then port else -1),
           McpBuildInfo.version,
           new Function[String, String]:
             def apply(command: String): String = runCommand(command)
@@ -122,11 +136,12 @@ object McpServerRuntime:
         val childHandle = invoke(bridge, "startHandle", startResult)
         val startupError = invoke(bridge, "startError", startResult).asInstanceOf[Throwable]
         if startupError != null then
-          Handle(host, port, loader, bridge, childHandle, directory).close()
+          Handle(host, port, socket, loader, bridge, childHandle, directory).close()
           throw OwnedStartupFailure(startupError)
-        val childHost = invoke(bridge, "host", childHandle).asInstanceOf[String]
-        val childPort = invoke(bridge, "port", childHandle).asInstanceOf[Integer].intValue()
-        Handle(childHost, childPort, loader, bridge, childHandle, directory)
+        val childHost   = invoke(bridge, "host", childHandle).asInstanceOf[String]
+        val childPort   = invoke(bridge, "port", childHandle).asInstanceOf[Integer].intValue()
+        val childSocket = Option(invoke(bridge, "socket", childHandle).asInstanceOf[String]).map(Path.of(_))
+        Handle(childHost, childPort, childSocket, loader, bridge, childHandle, directory)
       }
     catch
       case OwnedStartupFailure(cause) => throw cause
@@ -134,6 +149,22 @@ object McpServerRuntime:
         loader.close()
         deleteRecursively(directory)
         throw unwrap(error)
+
+  /**
+   * The answers the stdio launcher gives while sbt isn't running (`initialize`,
+   * `server/discover`, `tools/list`), as JSON. Loads the isolated runtime without
+   * starting a server; prefer [[Handle.snapshot]] when one is running.
+   */
+  def snapshot(): String =
+    val (loader, directory) = runtimeLoader()
+    try
+      withContextLoader(loader) {
+        val bridge = Class.forName("com.jamesward.sbtmcp.IsolatedMcpBridge$", true, loader).getField("MODULE$").get(null)
+        invoke(bridge, "snapshot", McpBuildInfo.version).asInstanceOf[String]
+      }
+    finally
+      loader.close()
+      deleteRecursively(directory)
 
   private def globSearch(query: String, inPackage: Option[String]): String =
     SymbolIndexState.globSearchResult(query, inPackage) match

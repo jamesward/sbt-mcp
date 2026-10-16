@@ -13,14 +13,15 @@ lazy val tastyQuery39Assets = (project in file("reader-assets"))
   )
 
 // The MCP/ZIO runtime is isolated from sbt's Scala 3.8 classloader. It compiles
-// with Scala 3.9 against zio-http-mcp 0.8.3 and is embedded with its full runtime
-// dependency closure; only a JDK callback bridge is visible to the sbt plugin.
+// with Scala 3.10 against zio-http-mcp (which serves the stdio framing over a socket)
+// and is embedded with its full runtime dependency closure; only a JDK callback
+// bridge is visible to the sbt plugin.
 lazy val isolatedMcpRuntime = (project in file("isolated-runtime"))
   .settings(
     publish / skip := true,
-    scalaVersion := "3.9.0",
+    scalaVersion := "3.10.0",
     Compile / unmanagedSourceDirectories += (root / baseDirectory).value / "src" / "isolated-runtime" / "scala",
-    libraryDependencies += "com.jamesward" %% "zio-http-mcp" % "0.8.3",
+    libraryDependencies += "com.jamesward" %% "zio-http-mcp" % "0.10.0",
   )
 
 // TASTy-linked symbol implementation. Its classes and TASTy Query 1.8 are
@@ -59,9 +60,14 @@ lazy val latestDependencyTests = (project in file("latest-tests"))
     publish / skip := true,
     name := "sbt-mcp-latest-dependency-tests",
     scalaVersion := "3.9.0",
+    // Each test starts isolated MCP runtimes and subprocesses: keep them out of sbt's JVM.
+    Test / fork := true,
     libraryDependencies ++= Seq(
       "com.jamesward" %% "zio-http-mcp" % "0.8.3"  % Test,
       "com.jamesward" %% "zio-evals"    % "0.1.2"  % Test,
+      // The official MCP Java SDK's stdio client, as a third-party client of the stdio launcher.
+      "io.modelcontextprotocol.sdk" % "mcp-core"          % "2.0.1" % Test,
+      "io.modelcontextprotocol.sdk" % "mcp-json-jackson2" % "2.0.1" % Test,
       "dev.zio"       %% "zio-test"     % "2.1.26" % Test,
       "dev.zio"       %% "zio-test-sbt" % "2.1.26" % Test,
     ),

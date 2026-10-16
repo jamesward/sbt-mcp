@@ -8,7 +8,7 @@ lazy val localIvy = ivyPaths := IvyPaths(baseDirectory.value.toString, Some(((Th
 ThisBuild / mcpEnabled     := true
 // This fixture intentionally exercises the server even when scripted runs in CI.
 ThisBuild / mcpDisableInCI := false
-ThisBuild / mcpPort        := 5093
+ThisBuild / mcpPort        := Some(5093)
 ThisBuild / mcpHost        := "127.0.0.1"
 ThisBuild / mcpDocsUrl     := None
 

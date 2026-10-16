@@ -15,6 +15,13 @@ jobs:
         java-version: 25
         cache: 'sbt'
 
+    - name: Unit and integration tests
+      timeout-minutes: 15
+      # testFull: sbt 2's `test` skips tests whose inputs are unchanged, and the sbt
+      # cache can restore those results. The eval specs are excluded: they make paid
+      # model calls (and need kiro-cli/claude) or depend on production javadocs.dev.
+      run: ./sbt --server --no-server --batch 'testFull; latestDependencyTests/testOnly * -com.jamesward.sbtmcp.SbtMcpEvalSpec -com.jamesward.sbtmcp.SbtMcpKiroDocsSpec'
+
     - name: Compile and run scripted tests
       timeout-minutes: 15
       run: ./sbt --server --no-server --batch 'compile; latestDependencyTests/Test/compile; scripted'

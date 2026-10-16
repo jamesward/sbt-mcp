@@ -7,9 +7,8 @@ object SbtMcpPluginSpec extends ZIOSpecDefault:
   private val ToolbookInstructions =
     SbtMcpPlugin.installInstructions(
       serverName = "sbt-mcp-toolbook",
-      url        = "http://127.0.0.1:5012/",
       enabled    = true,
-      port       = 5012,
+      port       = Some(5012),
     )
 
   def spec = suite("SbtMcpPluginSpec")(

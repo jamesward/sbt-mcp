@@ -6,7 +6,7 @@ lazy val root = (project in file("."))
     Global / mcpEnabled := true,
     // This fixture intentionally exercises the server even when scripted runs in CI.
     Global / mcpDisableInCI := false,
-    Global / mcpPort    := 5097,
+    Global / mcpPort    := Some(5097),
     Global / mcpHost    := "127.0.0.1",
     // Proxy a LOCAL upstream MCP server started by the forked harness.
     Global / mcpDocsUrl := Some("http://127.0.0.1:5197/"),

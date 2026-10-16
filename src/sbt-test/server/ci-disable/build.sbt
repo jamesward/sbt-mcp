@@ -1,7 +1,7 @@
 ThisBuild / scalaVersion := "3.8.4"
 
 Global / mcpEnabled := true
-Global / mcpPort    := 5096
+Global / mcpPort    := Some(5096)
 Global / mcpHost    := "127.0.0.1"
 Global / mcpDocsUrl := None
 
@@ -17,7 +17,7 @@ TaskKey[Unit]("checkCiDisable", "Verify the default CI and Heroku startup guard"
   val automatedBuild = inCI || onHeroku
   if (automatedBuild) {
     val socket = new java.net.ServerSocket()
-    try socket.bind(new java.net.InetSocketAddress("127.0.0.1", (Global / mcpPort).value))
+    try socket.bind(new java.net.InetSocketAddress("127.0.0.1", (Global / mcpPort).value.get))
     finally socket.close()
   }
 

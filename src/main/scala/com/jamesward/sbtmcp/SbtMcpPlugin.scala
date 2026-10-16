@@ -38,7 +38,7 @@ import scala.jdk.OptionConverters.*
  *   1. The lifecycle hooks live in [[globalSettings]] on `Global / onLoad` /
  *      `Global / onUnload`, which fire once per build load/unload — NOT once per
  *      aggregated project.
- *   2. `mcpEnabled` / `mcpDisableInCI` / `mcpPort` / `mcpHost` default in Global and
+ *   2. `mcpEnabled` / `mcpDisableInCI` / `mcpPort` / `mcpHost` / `mcpDocsUrl` default in Global and
  *      are read from the root build's root project, so the build you launched
  *      decides whether/where the server runs. Set them with `ThisBuild /` (or as
  *      root-project settings): a source dependency (`RootProject`/`ProjectRef` to
@@ -58,8 +58,10 @@ object SbtMcpPlugin extends AutoPlugin {
     val mcpDisableInCI = settingKey[Boolean](
       "Do not start the embedded MCP server in CI or Heroku builds (default true)."
     )
-    val mcpPort = settingKey[Int]("Loopback port for the embedded MCP server (default 5010).")
-    val mcpHost = settingKey[String]("Interface to bind; keep on loopback (default 127.0.0.1).")
+    val mcpPort = settingKey[Option[Int]](
+      "Also serve MCP over HTTP on this loopback port (default None: only the stdio launcher's user-only socket)."
+    )
+    val mcpHost = settingKey[String]("Interface the HTTP endpoint binds, with mcpPort; keep on loopback (default 127.0.0.1).")
     val mcpDocsUrl = settingKey[Option[String]](
       "Upstream MCP server whose tools are proxied and merged with ours (default javadocs.dev). Set None to disable."
     )
@@ -67,11 +69,17 @@ object SbtMcpPlugin extends AutoPlugin {
     val mcpInstall = taskKey[Unit](
       "Print instructions for an AI agent to register this sbt-mcp server in the local MCP client config and AGENTS.md."
     )
+    val mcpInstallStdio = taskKey[Unit](
+      "Write (or update) the stdio launcher .sbt-mcp/SbtMcpStdio.java and its snapshot.json, which MCP clients start to reach this build's sbt-mcp server, starting sbt when needed."
+    )
   }
   import autoImport.*
 
   // One sbt server JVM => at most one MCP server. Both are process-global.
   private val serverHandle = new AtomicReference[Option[McpServerRuntime.Handle]](None)
+  // The root build directory of the running server: where it advertises itself to the
+  // stdio launcher (project/target/sbt-mcp/server.json).
+  private val serverBase = new AtomicReference[Option[java.io.File]](None)
   private val starting     = new AtomicBoolean(false)
 
   // Latest build State, captured on each (re)load. Read off-thread by the
@@ -115,7 +123,7 @@ object SbtMcpPlugin extends AutoPlugin {
   override lazy val globalSettings: Seq[Setting[?]] = Seq(
     mcpEnabled     := false,
     mcpDisableInCI := true,
-    mcpPort        := 5010,
+    mcpPort        := None,
     mcpHost        := "127.0.0.1",
     mcpDocsUrl     := Some("https://www.javadocs.dev/mcp"),
     // `mcpExec <id>` runs a queued sbt-task ON the command loop (so it is
@@ -582,7 +590,7 @@ object SbtMcpPlugin extends AutoPlugin {
       val enabled     = mcpEnabled.value
       val disableInCI = mcpDisableInCI.value
       serverHandle.get match {
-        case Some(h) => log.info(s"sbt-mcp: running at http://${h.host}:${h.port}/")
+        case Some(h) => log.info(s"sbt-mcp: running (${describe(h)})")
         case None if enabled && disableInCI && isAutomatedBuild(sys.env) =>
           log.info(
             "sbt-mcp: not running (disabled in CI or a Heroku build; set `ThisBuild / mcpDisableInCI := false` to override)"
@@ -603,16 +611,33 @@ object SbtMcpPlugin extends AutoPlugin {
     // reads global settings, so opt out of action caching like `mcpStatus`.
     mcpInstall := Def.uncached {
       val log        = streams.value.log
-      val host       = mcpHost.value
-      val port       = mcpPort.value
-      val enabled    = mcpEnabled.value
       val projName   = name.value
       val serverName = if (projName.startsWith("sbt-mcp")) projName else s"sbt-mcp-$projName"
-      val url        = s"http://$host:$port/"
-      installInstructions(serverName, url, enabled, port).linesIterator.foreach(line => log.info(line))
+      installInstructions(serverName, mcpEnabled.value, mcpHost.value, mcpPort.value)
+        .linesIterator.foreach(line => log.info(line))
     },
     // Single build-wide server (see mcpStatus): print the guidance once, not per module.
     mcpInstall / aggregate := false,
+    // Writes the stdio launcher into the root build's directory (side effects: uncached).
+    mcpInstallStdio := Def.uncached {
+      val log        = streams.value.log
+      val base       = (LocalRootProject / baseDirectory).value
+      val projName   = (LocalRootProject / name).value
+      val serverName = if (projName.startsWith("sbt-mcp")) projName else s"sbt-mcp-$projName"
+      val snapshot   = serverHandle.get.fold(McpServerRuntime.snapshot())(_.snapshot())
+      val changed    = McpStdioLauncher.install(base, snapshot)
+      val dir        = new java.io.File(base, McpStdioLauncher.Directory)
+      if (changed.isEmpty) log.info(s"sbt-mcp: the stdio launcher in $dir is up to date")
+      else changed.foreach(f => log.info(s"sbt-mcp: wrote $f"))
+      log.info(
+        s"""sbt-mcp: commit ${McpStdioLauncher.Directory}/ and register the launcher in the MCP client config
+           |(Kiro: .kiro/settings/mcp.json, Claude Code: .mcp.json, Cursor: .cursor/mcp.json):
+           |${McpStdioLauncher.clientConfig(serverName, RecommendedClientTimeout.toMillis)}""".stripMargin
+      )
+      if (!mcpEnabled.value)
+        log.warn("sbt-mcp: the launcher needs the server enabled: set `ThisBuild / mcpEnabled := true`")
+    },
+    mcpInstallStdio / aggregate := false,
     // Test frameworks print results to the test JVM's stdout, which never reaches the
     // log `sbt-task` returns. Log each failed test's name and message through sbt's
     // logger while an `sbt-task` runs, so the response says which assertion failed.
@@ -650,22 +675,35 @@ object SbtMcpPlugin extends AutoPlugin {
     if (!starting.compareAndSet(false, true)) return // another thread is starting it
     try {
       if (serverHandle.get.isEmpty) {
-        val host   = extracted.getOpt(rootRef(extracted) / mcpHost).getOrElse("127.0.0.1")
-        val port   = extracted.getOpt(rootRef(extracted) / mcpPort).getOrElse(5010)
+        val host    = extracted.getOpt(rootRef(extracted) / mcpHost).getOrElse("127.0.0.1")
+        val port    = extracted.getOpt(rootRef(extracted) / mcpPort).flatten
         val docsUrl = extracted.getOpt(rootRef(extracted) / mcpDocsUrl).flatten
+        val base    = rootBase(extracted)
+        val socket  = McpStdioLauncher.socketPath(BuildPaths.getGlobalBase(state), base)
         val handle = McpServerRuntime.start(
           host,
-          port,
+          port.getOrElse(0),
           runCommand,
           () => refreshIndex(),
           () => taskInfos(currentState.get),
           docsUrl,
           (files, content, scope) => runCheck(files, content, scope),
           (tool, args) => runBuildTool(tool, args),
+          socket = Some(socket),
+          http = port.isDefined,
         )
         serverHandle.set(Some(handle))
+        try {
+          McpStdioLauncher.writeServerFile(base, socket, httpUrl(handle), ProcessHandle.current().pid(), McpBuildInfo.version)
+          serverBase.set(Some(base))
+          deleteServerFileOnExit()
+        } catch {
+          case scala.util.control.NonFatal(e) =>
+            state.log.warn(s"sbt-mcp: could not write ${McpStdioLauncher.serverFile(base)} for the stdio launcher: ${e.getMessage}")
+        }
+        outdatedLauncherWarning(base, handle).foreach(w => state.log.warn(w))
         state.log.info(
-          s"""sbt-mcp: MCP server started at http://$host:$port/
+          s"""sbt-mcp: MCP server started (${describe(handle)})
              |sbt-mcp: Setup in an AI agent with this prompt:
              |follow the instructions available via `./sbt mcpInstall` to setup sbt-mcp
              |""".stripMargin)
@@ -677,6 +715,42 @@ object SbtMcpPlugin extends AutoPlugin {
       starting.set(false)
     }
   }
+
+  // `shutdown` exits sbt without unloading the build, so remove server.json and the socket
+  // on JVM exit too. The hook is per plugin classloader (a `reload` loads a new one) and reads
+  // whichever file is current; the launcher also ignores a file whose pid has exited.
+  private val exitHookInstalled = new AtomicBoolean(false)
+  private def deleteServerFileOnExit(): Unit =
+    if (exitHookInstalled.compareAndSet(false, true))
+      java.lang.Runtime.getRuntime.addShutdownHook(new Thread(
+        () => {
+          serverBase.get.foreach(McpStdioLauncher.deleteServerFile)
+          serverHandle.get.flatMap(_.socket).foreach(s => scala.util.Try(java.nio.file.Files.deleteIfExists(s)))
+        },
+        "sbt-mcp-server-file",
+      ))
+
+  private def httpUrl(handle: McpServerRuntime.Handle): Option[String] =
+    Option.when(handle.port > 0)(s"http://${handle.host}:${handle.port}/")
+
+  /** Where a running server listens, for status lines. */
+  private def describe(handle: McpServerRuntime.Handle): String =
+    (handle.socket.map(s => s"socket $s, for the stdio launcher") ++
+      httpUrl(handle).map(u => s"HTTP $u (loopback, no auth — dev use only)")).mkString("; ")
+
+  /** The root build's directory. */
+  private def rootBase(extracted: Extracted): java.io.File =
+    extracted.structure.units(extracted.structure.root).localBase
+
+  /** A warning when the committed stdio launcher files differ from what this plugin version writes. */
+  private def outdatedLauncherWarning(base: java.io.File, handle: McpServerRuntime.Handle): Option[String] =
+    try {
+      val outdated = McpStdioLauncher.outdated(base, handle.snapshot())
+      Option.when(outdated.nonEmpty)(
+        s"sbt-mcp: the stdio launcher is out of date (${outdated.map(f => base.toPath.relativize(f.toPath)).mkString(", ")}); " +
+          "run `mcpInstallStdio` to update it, and commit the result"
+      )
+    } catch { case scala.util.control.NonFatal(e) => Some(s"sbt-mcp: could not check the stdio launcher: ${e.getMessage}") }
 
   /** The root project of the root build (the build sbt was launched in), whatever the session's current project is. */
   private def rootRef(extracted: Extracted): ProjectRef = {
@@ -753,20 +827,34 @@ object SbtMcpPlugin extends AutoPlugin {
    * Build the agent-facing onboarding text printed by the `mcpInstall` task: how to
    * register this server in the local MCP client config, and the AGENTS.md usage
    * guidance an agent should adopt. `serverName` defaults to `sbt-mcp-<project name>`
-   * (rename freely); `url` is derived from the configured `mcpHost`/`mcpPort`.
+   * (rename freely); the HTTP URL is derived from `mcpHost`/`mcpPort`.
    */
-  private[sbtmcp] def installInstructions(serverName: String, url: String, enabled: Boolean, port: Int): String = {
+  private[sbtmcp] def installInstructions(
+      serverName: String,
+      enabled: Boolean,
+      host: String = "127.0.0.1",
+      port: Option[Int] = None,
+  ): String = {
+    val url = s"http://$host:${port.getOrElse(5010)}/"
     val enableBlock =
       if (enabled)
-        s"The server is enabled; once sbt is loaded it listens at $url."
+        "The server is enabled; once sbt is loaded it listens on a socket only this user can open" +
+          port.fold(".")(_ => s", and over HTTP at $url.")
       else
         s"""The MCP server is NOT enabled yet. Enable it by adding to build.sbt (or a
            |git-ignored local dev override):
            |
            |    ThisBuild / mcpEnabled := true
-           |    ThisBuild / mcpPort    := $port
            |
            |then `reload` sbt so the server starts.""".stripMargin
+    val httpBlock =
+      if (port.isDefined) s"   This build serves HTTP at $url:"
+      else
+        """   This needs HTTP, which is off by default (any local process could reach it):
+           |
+           |       ThisBuild / mcpPort := Some(5010)
+           |
+           |   then:""".stripMargin
 
     s"""|=== sbt-mcp install instructions (for an AI agent) ===
         |
@@ -775,20 +863,35 @@ object SbtMcpPlugin extends AutoPlugin {
         |$enableBlock
         |
         |IMPORTANT: `mcpInstall` only prints guidance. It does not inspect or edit any
-        |existing config. Before adding the snippet below, check for the exact server
-        |key or another key with the same URL, then reconcile its name, type, URL,
-        |timeout, and disabled fields manually.
-        |
-        |`mcpInstall` does not daemonize sbt. A one-shot `./sbt mcpInstall` process
-        |exits after printing these instructions and its MCP server stops. Start a
-        |long-lived sbt session and keep it loaded; that session must remain running
-        |while the MCP client uses the server.
+        |existing config. Before adding a snippet below, check for the exact server
+        |key or another key with the same URL or command, then reconcile its name, type,
+        |URL or command, timeout, and disabled fields manually.
         |
         |2) Register the server in the local project's MCP client config. Add it to the
         |   config file your agent reads (create the file if missing):
         |     - Kiro:        .kiro/settings/mcp.json
         |     - Claude Code: .mcp.json
         |     - Cursor:      .cursor/mcp.json
+        |
+        |   Recommended: the stdio launcher. Run `./sbt mcpInstallStdio` once (and again
+        |   after upgrading sbt-mcp; sbt warns when it is out of date). It writes
+        |   `${McpStdioLauncher.Directory}/${McpStdioLauncher.LauncherName}` and `${McpStdioLauncher.Directory}/${McpStdioLauncher.SnapshotName}`; commit both.
+        |   The MCP client starts the launcher (it needs only `java`). The launcher
+        |   connects to sbt-mcp on a socket only this user can open, and starts sbt
+        |   when it isn't running (`sbt --client`: sbt's shared background server,
+        |   which later `./sbt` commands use too, and which keeps running), so the
+        |   client can connect before sbt is up:
+        |
+        |${indent(McpStdioLauncher.clientConfig(serverName, RecommendedClientTimeout.toMillis), 4)}
+        |
+        |   The path is relative to the build's root directory, where clients start
+        |   project MCP servers; use an absolute path if yours starts them elsewhere.
+        |
+        |   Alternatively, connect over HTTP to an sbt session you keep running.
+        |   `mcpInstall` does not daemonize sbt: a one-shot `./sbt --server mcpInstall`
+        |   exits after printing, and its MCP server stops with it. Start a long-lived sbt
+        |   session and keep it loaded; it must remain running while the client uses it.
+        |$httpBlock
         |
         |    {
         |      "mcpServers": {
@@ -839,7 +942,11 @@ object SbtMcpPlugin extends AutoPlugin {
         |=== end sbt-mcp install instructions ===""".stripMargin
   }
 
+  private def indent(text: String, spaces: Int): String =
+    text.linesIterator.map(line => " " * spaces + line).mkString("\n")
+
   private def stopServer(log: Logger): Unit =
+    serverBase.getAndSet(None).foreach(McpStdioLauncher.deleteServerFile)
     serverHandle.getAndSet(None).foreach { h =>
       try h.close()
       catch { case scala.util.control.NonFatal(_) => () }

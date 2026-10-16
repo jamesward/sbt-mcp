@@ -35,6 +35,13 @@ TaskKey[Unit]("checkInstall", "Verify mcpInstall printed the expected instructio
   assert(!txt.contains("sbt-mcp-sbt-mcp"),
     "mcpInstall produced a doubled `sbt-mcp-` server-name prefix")
 
+  // The stdio launcher is the recommended registration; HTTP stays the alternative.
+  assert(txt.contains("`./sbt mcpInstallStdio`") && txt.contains("\"type\": \"stdio\"") &&
+    txt.contains("\"args\": [\".sbt-mcp/SbtMcpStdio.java\"]"),
+    "mcpInstall did not recommend the stdio launcher")
+  assert(txt.contains("\"type\": \"http\""), "mcpInstall dropped the HTTP alternative")
+  assert(!(baseDirectory.value / ".sbt-mcp").exists, "mcpInstall must not write the launcher itself")
+
   // ISSUE.md issue 2: the non-mutating installer must prominently explain that
   // existing registrations are not inspected or edited and how to reconcile them.
   assert(staleConfig.contains("\"sbt-mcp-install-checks\""),

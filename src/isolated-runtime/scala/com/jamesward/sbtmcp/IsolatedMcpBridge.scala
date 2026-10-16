@@ -8,6 +8,7 @@ import scala.jdk.CollectionConverters.*
   private final case class StartResult(handle: Object, error: Throwable)
 object IsolatedMcpBridge:
   def start(
+      socket: String,
       host: String,
       port: Int,
       implementationVersion: String,
@@ -22,6 +23,7 @@ object IsolatedMcpBridge:
       docsUrl: String,
   ): Object =
     try StartResult(McpServerRuntimeImpl.start(
+      Option(socket).map(java.nio.file.Path.of(_)),
       host,
       port,
       implementationVersion,
@@ -45,6 +47,10 @@ object IsolatedMcpBridge:
       case failure: McpServerRuntimeImpl.StartupFailure =>
         StartResult(failure.childHandle, failure.getCause)
 
+  /** The stdio launcher's snapshot (JSON); see [[McpServerRuntimeImpl.snapshot]]. */
+  def snapshot(implementationVersion: String): String =
+    McpServerRuntimeImpl.snapshot(implementationVersion)
+
   def startHandle(result: Object): Object =
     result.asInstanceOf[StartResult].handle
 
@@ -56,6 +62,9 @@ object IsolatedMcpBridge:
 
   def port(handle: Object): Int =
     handle.asInstanceOf[McpServerRuntimeImpl.Handle].port
+
+  def socket(handle: Object): String =
+    handle.asInstanceOf[McpServerRuntimeImpl.Handle].socket.map(_.toString).orNull
 
   def close(handle: Object): Unit =
     handle.asInstanceOf[McpServerRuntimeImpl.Handle].close()

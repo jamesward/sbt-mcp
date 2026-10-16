@@ -6,7 +6,7 @@ lazy val root = (project in file("."))
     Global / mcpEnabled := true,
     // This fixture intentionally exercises the server even when scripted runs in CI.
     Global / mcpDisableInCI := false,
-    Global / mcpPort    := 5099,
+    Global / mcpPort    := Some(5099),
     Global / mcpHost    := "127.0.0.1",
     Global / mcpDocsUrl := None,
   )

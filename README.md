@@ -58,34 +58,90 @@ The plugin triggers on all JVM projects but does nothing until you enable it.
 // build.sbt (or a local, git-ignored dev override)
 ThisBuild / mcpEnabled     := true        // default: false
 ThisBuild / mcpDisableInCI := true        // default: true; set false to allow startup in CI/Heroku
-ThisBuild / mcpPort        := 5010        // default: 5010
-ThisBuild / mcpHost        := "127.0.0.1" // default: loopback only
+// Optional: also serve HTTP on a port (off by default)
+ThisBuild / mcpPort        := Some(5010)  // default: None (stdio launcher only)
+ThisBuild / mcpHost        := "127.0.0.1" // default: loopback only; only with mcpPort
 ```
 
 Use `ThisBuild /` (or plain root-project settings), not `Global /`. Global is one scope
 shared by every build sbt loads, so when this build depends on another checkout from
 source (`RootProject(file("../other"))` or `ProjectRef`) and that build sets
-`Global / mcpPort`, it can replace yours. Only one MCP server runs per sbt JVM, and it's
+`Global / mcpEnabled`, it can replace yours. Only one MCP server runs per sbt JVM, and it's
 always the one configured by the build you launched (its root project); a source
 dependency's own sbt-mcp settings are ignored. sbt-mcp warns at load when another
 build's `Global /` setting would win. To use the dependency's MCP server too, run sbt in
-its own checkout, where it listens on its own port.
+its own checkout, where it has its own server.
 
 When enabled, the server starts on the next sbt load and prints:
 
 ```
-sbt-mcp: MCP server started at http://127.0.0.1:5010/ (loopback, no auth — dev use only)
+sbt-mcp: MCP server started (socket ~/.sbt/2/sbt-mcp/<hash>/mcp.sock, for the stdio launcher)
 ```
 
-Point an MCP client (Claude Code, Cursor, etc.) at `http://127.0.0.1:5010/`.
-`mcpStatus` prints whether the server is running.
+The server listens on a Unix domain socket that only your user can open, speaking
+MCP's stdio framing (one JSON-RPC message per line). MCP clients reach it through the
+[stdio launcher](#stdio-launcher), which also starts sbt when it isn't running. With
+`mcpPort := Some(5010)` it also serves Streamable HTTP on `http://127.0.0.1:5010/`, for
+clients that only take a URL. `mcpStatus` prints whether the server is running and
+where.
+
+### stdio launcher
+
+MCP clients connect to their servers when a session starts, which is usually before
+anyone has started sbt. The stdio launcher is what the client starts: it connects to
+the build's server, and starts sbt if needed.
+
+```bash
+./sbt mcpInstallStdio
+```
+
+writes `.sbt-mcp/SbtMcpStdio.java` and `.sbt-mcp/snapshot.json` (commit both) and
+prints the client entry:
+
+```json
+{
+  "mcpServers": {
+    "sbt-mcp-myproject": {
+      "type": "stdio",
+      "command": "java",
+      "args": [".sbt-mcp/SbtMcpStdio.java"],
+      "timeout": 1800000
+    }
+  }
+}
+```
+
+The launcher is a single Java file with no dependencies, run by the JDK's source
+launcher (JDK 17+). It relays messages between the client and the server's socket.
+When sbt isn't running it starts it with `sbt --client mcpStatus` (sbt's own
+background server, the one later `./sbt` commands connect to; it keeps running after
+the client exits). Until the server is up, it answers `initialize`,
+`server/discover` and `tools/list` from the snapshot, so the client connects and
+lists the built-in tools within seconds; tool calls wait for sbt. Once sbt is up, a
+changed tool list (e.g. the proxied javadocs.dev tools) is announced with
+`notifications/tools/list_changed`. A `reload` restarts the server: a call running
+across it fails with a "connection was lost" error (it may or may not have
+completed), and calls made meanwhile wait for the restarted server. It speaks the
+legacy (`initialize`) protocol revisions and 2026-07-28.
+
+- `--start=lazy` starts sbt on the first request that needs it instead of right
+  away; `--start=never` only connects to an sbt started some other way.
+- It finds the server's socket through `project/target/sbt-mcp/server.json`, which
+  sbt-mcp writes while it runs.
+- Diagnostics: `project/target/sbt-mcp/stdio.log` (the launcher) and
+  `project/target/sbt-mcp/boot.log` (sbt's startup output).
+- Re-run `mcpInstallStdio` after upgrading sbt-mcp; sbt warns at startup when the
+  committed files are out of date.
+- Clients start project servers in the project's root directory. If yours starts
+  them elsewhere, use an absolute path to the `.java` file and add
+  `--project-dir=<build root>`.
 
 `mcpInstall` prints copy-pasteable onboarding for an AI agent: how to register this
-server in the local MCP client config (Kiro / Claude Code / Cursor) using the
-configured host/port, and the `AGENTS.md` usage guidance to adopt (drive sbt through
+server in the local MCP client config (Kiro / Claude Code / Cursor), with the stdio
+launcher (or HTTP, which needs `mcpPort`), and the `AGENTS.md` usage guidance to adopt (drive sbt through
 the `compile` / `test` / … tools and `sbt-task`, use `glob-search` / `inspect` / `symbol-location` for symbols).
 It is deliberately non-mutating: it does not inspect or edit existing config, so
-reconcile any existing key that uses the same URL manually. The generated HTTP
+reconcile any existing key that uses the same URL or command manually. The generated
 client timeout is 30 minutes, matching the server-side task wait.
 
 Run it directly or via the `sbt-task` tool so the text is returned to the agent.
@@ -96,12 +152,13 @@ For plain direct capture without sbt supershell/logger control sequences, use:
 ```
 
 `mcpInstall` does not daemonize sbt. A one-shot invocation exits after printing and
-stops its embedded server; keep a long-lived sbt session loaded while clients use MCP.
+stops its embedded server. The stdio launcher starts a long-lived sbt itself; with
+HTTP, keep a long-lived sbt session loaded while clients use MCP.
 
-> **After enabling (or after a `reload`), reconnect your MCP client.** MCP clients
-> fetch the tool list once at connect time, so a client that connected before the
-> server started — or before a `reload` restarted it — won't show the tools (or the
-> proxied javadocs.dev tools). Restart the client session / re-init MCP to pick them up.
+> **With HTTP, reconnect your MCP client after enabling (or after a `reload`).** MCP
+> clients fetch the tool list once at connect time, so an HTTP client that connected
+> before the server started, or before a `reload` restarted it, won't show the tools
+> (or the proxied javadocs.dev tools). The stdio launcher handles this itself.
 
 ## Usage
 
@@ -151,7 +208,9 @@ stops its embedded server; keep a long-lived sbt session loaded while clients us
   `{"command":"scalafmtAll"}`, `{"command":"clean; compile"}`) runs any command line on
   sbt's command loop and works even while a `~` watch is active. It returns status, elapsed milliseconds, and
   either captured compiler output or an explicit `captured output: empty` marker.
-  It needs an sbt session attached; if another command is running it waits its turn.
+  It works in an interactive sbt shell and in a background server started by
+  `sbt --client` (no client needs to stay connected); if another command is running it
+  waits its turn.
 
 ### Multi-project builds
 
@@ -170,20 +229,28 @@ across subprojects — it prints one status line even on an aggregating root.
 |------------------|---------------|------------------------------------------|
 | `mcpEnabled`     | `false`       | Start the embedded MCP server on load    |
 | `mcpDisableInCI` | `true`        | Do not start when `CI` is truthy or `SOURCE_VERSION` identifies a Heroku build; use `false` to override |
-| `mcpPort`        | `5010`        | Loopback port to bind                    |
-| `mcpHost`        | `"127.0.0.1"` | Interface to bind (keep on loopback)     |
+| `mcpPort`        | `None`        | `Some(port)` also serves Streamable HTTP on `mcpHost:port` |
+| `mcpHost`        | `"127.0.0.1"` | Interface for HTTP (with `mcpPort`; keep on loopback) |
 | `mcpDocsUrl`     | `Some("https://www.javadocs.dev/mcp")` | Upstream MCP server to proxy/merge; `None` disables |
+
+Tasks: `mcpStatus` (server status), `mcpInstall` (onboarding text for an agent),
+`mcpInstallStdio` (write or update the [stdio launcher](#stdio-launcher)).
 
 ## Security
 
-- **Off by default.** Nothing binds a port unless `mcpEnabled := true`.
+- **Off by default.** Nothing listens unless `mcpEnabled := true`.
 - **Disabled in automated builds by default.** Even when enabled, the server does
-  not bind when `CI` is truthy or Heroku provides a nonblank `SOURCE_VERSION`, unless
+  not start when `CI` is truthy or Heroku provides a nonblank `SOURCE_VERSION`, unless
   `mcpDisableInCI := false`.
-- **Loopback only.** Binds `127.0.0.1`. Do **not** set `mcpHost` to `0.0.0.0`.
-- **No auth yet, and `sbt-task`, `run` and `show` can run arbitrary code** — treat the endpoint as a
-  local, dev-only RCE surface. `zio-http-mcp` supports OAuth/token auth (`McpAuth`);
-  wire it in before any non-loopback use.
+- **User-only socket by default.** The server listens on a Unix domain socket in an
+  owner-only (0700) directory under sbt's global base (`~/.sbt/2/sbt-mcp/`), with the
+  socket itself 0600, like sbt's own server socket. Other users can't connect.
+- **HTTP is opt-in and unauthenticated.** With `mcpPort := Some(port)` the server also
+  binds `127.0.0.1:port`, which **any local process or user** can reach. Do **not** set
+  `mcpHost` to `0.0.0.0`.
+- **The tools can run arbitrary code** (`sbt-task`, `run`, `show`): treat any way in
+  as a local, dev-only RCE surface. `zio-http-mcp` supports OAuth/token auth
+  (`McpAuth`); wire it in before any non-loopback HTTP use.
 - **Outbound proxy.** When enabled, tool listing/calls make an outbound request to
   the `mcpDocsUrl` upstream (javadocs.dev by default) to merge/forward its tools. Set
   `mcpDocsUrl := None` to keep everything local (no outbound network).
@@ -199,6 +266,10 @@ across subprojects — it prints one status line even on an aggregating root.
   its `.tasty` exists. If it doesn't compile, the tools answer from the last good
   compile and append a `(note: the project does not currently compile …)` line — fix
   the build (e.g. `compile` tool) and query again.
+- **The stdio launcher doesn't connect.** Read `project/target/sbt-mcp/stdio.log`
+  and `project/target/sbt-mcp/boot.log`. A tool call that fails with "sbt-mcp is not
+  running after starting sbt" means sbt started but the server didn't: check
+  `ThisBuild / mcpEnabled := true` (and `mcpDisableInCI` in CI).
 - **Tools change after editing the build/plugin.** When consuming the plugin from
   source, `reload` (or restart sbt) to recompile it, then reconnect the client.
 

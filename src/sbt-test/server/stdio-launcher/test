@@ -1,0 +1,17 @@
+# The running server advertises itself to the stdio launcher.
+> checkServerFile
+
+# mcpInstallStdio writes the launcher and its snapshot, then finds them up to date.
+> mcpInstallStdio
+> checkInstalled
+> mcpInstallStdio
+> checkLogged "the stdio launcher in"
+
+# A stale snapshot (e.g. after a plugin upgrade) is reported when the server starts.
+$ copy-file changes/snapshot.json .sbt-mcp/snapshot.json
+> reload
+> checkLogged "the stdio launcher is out of date (.sbt-mcp/snapshot.json)"
+# The restarted server binds the same socket again.
+> checkServerFile
+> mcpInstallStdio
+> checkInstalled

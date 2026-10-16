@@ -33,15 +33,63 @@ object McpInProcess {
   def isBusy: Boolean = StandardMain.exchange.currentExec.isDefined
 
   /**
-   * Append `commandLine` to sbt's command loop via an existing channel, so it runs
-   * on the loop thread (serialized with any `~` watch). Returns false if there is
-   * no channel to append through (no sbt session attached yet).
+   * Append `commandLine` to sbt's command loop, so it runs on the loop thread
+   * (serialized with any `~` watch). Returns false only if no channel could be found
+   * or created. See [[channel]] for which channel carries the command.
    */
   def enqueue(commandLine: String, execId: String): Boolean =
-    StandardMain.exchange.channels.headOption match {
+    channel match {
       case Some(ch) => ch.append(Exec(commandLine, Some(execId), Some(CommandSource(ch.name))))
       case None     => false
     }
+
+  /** Name of the channel sbt-mcp adds when sbt has no console of its own. */
+  private[sbt] final val ChannelName = "sbt-mcp"
+
+  /**
+   * The channel MCP commands are appended through: the interactive console when sbt
+   * has one, otherwise a console-like channel owned by sbt-mcp. A server started in
+   * the background by a thin client (`sbt --client`, sbt 2's default) has no console
+   * channel, and its network channels belong to clients that come and go (each
+   * `sbtn` invocation, a BSP connection): sbt drops an exiting client's queued
+   * commands, so they can't carry an MCP command that waits its turn.
+   *
+   * The sbt-mcp channel is a [[sbt.internal.ConsoleChannel]] so the command loop
+   * treats its commands like typed ones (e.g. reloading after build sources
+   * change), but its prompt never reads input. It is added once per sbt JVM and
+   * found by name after a `reload` loads a new copy of this plugin.
+   */
+  private def channel: Option[sbt.internal.CommandChannel] =
+    try {
+      val exchange = StandardMain.exchange
+      exchange.channels
+        .collectFirst { case c: sbt.internal.ConsoleChannel if c.name != ChannelName => c }
+        .orElse(exchange.channels.find(_.name == ChannelName))
+        .orElse(synchronized {
+          exchange.channels.find(_.name == ChannelName).orElse {
+            val created = new sbt.internal.ConsoleChannel(ChannelName, (_, ch) => new IdleUITask(ch))
+            exchange.subscribe(created)
+            Some(created)
+          }
+        })
+    } catch { case NonFatal(_) => StandardMain.exchange.channels.headOption }
+
+  /**
+   * The sbt-mcp channel's prompt: it waits, reading nothing, until sbt closes it
+   * (the next prompt reuses a running task of the same class).
+   */
+  private final class IdleUITask(override private[sbt] val channel: sbt.internal.CommandChannel)
+      extends sbt.internal.ui.UITask {
+    private val closed = new java.util.concurrent.CountDownLatch(1)
+    override private[sbt] val reader: sbt.internal.ui.UITask.Reader =
+      new sbt.internal.ui.UITask.Reader {
+        def readLine(): Either[String, String] = {
+          closed.await()
+          throw sbt.internal.ui.UITask.Reader.interrupted
+        }
+        override def close(): Unit = closed.countDown()
+      }
+  }
 
   /**
    * Run `commandLine` against `state` — intended to be called ON the loop thread

@@ -14,8 +14,8 @@ sbt scripted         # all scripted integration tests
 sbt 'scripted server/multi-module' # sbt 2.0 plugin indexing Scala 3.9 modules
 ```
 
-Runtime dependencies: zio-http-mcp **0.8.3** (zio 2.1.26 / zio-http
-3.11.6 / zio-schema 1.9.0) is compiled in the Scala 3.9
+Runtime dependencies: zio-http-mcp **0.10.0** (`McpServer.serveStream`; zio 2.1.26 /
+zio-http 3.11.6 / zio-schema 1.9.0) is compiled in the Scala 3.10
 `isolatedMcpRuntime` project and embedded with its full dependency closure. None of
 those jars appear on the published plugin's production dependency classpath. Symbol
 indexing is also fully isolated: a Scala 3.8 `isolatedSymbolRuntime` jar plus
@@ -24,7 +24,8 @@ tasty-query classes or dependencies appear on the published plugin's production
 classpath.
 
 Tests that directly consume current Scala 3.9 artifacts live in
-`latestDependencyTests`: it uses zio-http-mcp **0.8.3** and zio-evals **0.1.2**.
+`latestDependencyTests`: it uses zio-http-mcp **0.8.3**, zio-evals **0.1.2**, and the MCP Java SDK
+(`mcp-core` **2.0.1**, as a third-party stdio client).
 Scripted MCP client checks likewise run in forked Scala 3.9 fixture subprojects
 using zio-http-mcp **0.8.3**, keeping those APIs out of sbt's Scala 3.8
 meta-build classloader.
@@ -46,8 +47,8 @@ meta-build classloader.
     compare-and-set, so even a repeated `onLoad` (e.g. `reload`) can't bind the
 
 - **MCP/ZIO dependencies are classloader-isolated.** `McpServerRuntime` in the
-  plugin is a JDK-only facade. It extracts a nested Scala 3.9 runtime containing
-  `McpServerRuntimeImpl`, zio-http-mcp 0.8.3, ZIO HTTP, Netty, and their dependency
+  plugin is a JDK-only facade. It extracts a nested Scala 3.10 runtime containing
+  `McpServerRuntimeImpl`, zio-http-mcp, ZIO HTTP, Netty, and their dependency
   closure, then launches it in a platform-parented `URLClassLoader`. Commands,
   refreshes, task lists, and symbol operations cross through `IsolatedMcpBridge`
   using only `java.util.function` interfaces, strings, and opaque handles. Closing
@@ -137,6 +138,54 @@ meta-build classloader.
     the compiles involved are re-requested (cache hits) and the problems read from the
     `xsbti.CompileFailed` they throw.
 
+- **Transports.** The server always listens on a Unix domain socket speaking the stdio
+  transport's framing, which the stdio launcher connects to: `SocketListener` accepts
+  connections and serves each one with zio-http-mcp's `McpServer.serveStream`
+  (stateless dispatch per message, concurrent requests, `notifications/cancelled`
+  interrupting the request). The transport spec recommends reusing the stdio framing for
+  custom byte-stream transports. The socket is `<sbt global base>/sbt-mcp/<hash of the
+  build dir>/mcp.sock` (`McpStdioLauncher.socketPath`; the temp directory when that would
+  exceed ~100 bytes), directory 0700 and socket 0600. A stale socket file (killed sbt) is
+  replaced; a live one makes startup fail. Streamable HTTP (`statelessRoutes`) is only
+  bound when `mcpPort` is `Some(port)`.
+
+- **stdio launcher.** `src/main/resources/sbt-mcp-stdio/SbtMcpStdio.java` is copied
+  into a build's `.sbt-mcp/` by `mcpInstallStdio` (`McpStdioLauncher`), with
+  `snapshot.json`. It is plain Java (JDK only, its own small JSON parser) because it
+  must start before sbt and without resolving anything: clients run it with the
+  `java` source launcher. Pieces:
+  - **Discovery.** While the server runs, the plugin writes
+    `project/target/sbt-mcp/server.json` (`socket`, `url` with `mcpPort`, `pid`,
+    `version`; written atomically, deleted on unload and by a JVM shutdown hook, which
+    also removes the socket). The launcher trusts it only while that pid is alive.
+  - **Snapshot.** `McpServerRuntimeImpl.snapshot` makes real `initialize`,
+    `server/discover` and `tools/list` requests (legacy and 2026-07-28) to the
+    built-in tools' server in-process (`statelessRoutes.runZIO`, no port, no docs
+    proxy), so the offline answers are exactly what the server would say. The tool
+    list doesn't depend on the build, only on the plugin version; the drift warning
+    on load compares the committed files with what this version writes.
+  - **Relay.** One connection to the socket, messages copied both ways line by line.
+    Requests are queued until connected (also across a `reload`, which restarts the
+    server and closes the connection); requests already sent when a connection drops get
+    a "connection was lost" error (the command may have run), since resending could run it
+    twice. `notifications/cancelled` is forwarded for sent requests (the server interrupts
+    them) and drops unsent ones; no response for a cancelled id reaches the client. On
+    each connect the launcher sends its own `tools/list` (ids `sbt-mcp-stdio:…`, never
+    forwarded) and, when the live list differs from what the client was given, sends
+    `notifications/tools/list_changed` (to legacy clients, and on its own 2026-07-28
+    `subscriptions/listen` subscriptions), so `listChanged` is advertised in its answers.
+  - **Starting sbt.** `sbt --client mcpStatus` (the build's `./sbt` script if present,
+    `--jvm-client` as a fallback): sbtn connects to the build's sbt server or starts one
+    in the background, and the server outlives the client. Failures are reported to the
+    waiting tool calls with the tail of `boot.log`, and retried at most every 30 s.
+
+- **Commands run without an attached client.** `McpInProcess.enqueue` appends through
+  the interactive console channel when sbt has one. A server started by `sbt --client`
+  has none, and its network channels belong to clients that disconnect (sbt then drops
+  their queued commands), so sbt-mcp subscribes its own `ConsoleChannel` named
+  `sbt-mcp` whose prompt never reads input. It is created once per JVM and found by name
+  after a `reload`.
+
 - **Documentation tools are proxied.** `McpServerRuntimeImpl.ProxyToolSource` implements
   zio-http-mcp's `McpToolSource`: its `listTools` connects to the upstream MCP server
   (`mcpDocsUrl`, default javadocs.dev) and merges those tools into `tools/list`, and
@@ -198,6 +247,7 @@ meta-build classloader.
 | Concern | Where |
 |---------|-------|
 | Plugin, lifecycle, command registration, refresh orchestration | `SbtMcpPlugin` |
+| stdio launcher (installed files, `server.json`) / its source | `McpStdioLauncher`; `src/main/resources/sbt-mcp-stdio/SbtMcpStdio.java` |
 | Isolated MCP server facade / child implementation | `McpServerRuntime`; `McpServerRuntimeImpl`, `IsolatedMcpBridge` under `src/isolated-runtime` |
 | Structured build tools: schemas / implementation / recording | `BuildTools` (isolated); `McpBuildTools`, `McpRunRecorder`, `sbt.McpKeys` |
 | In-process command execution / output capture / failure detection | `sbt.McpInProcess` (package `sbt`) |
@@ -211,8 +261,11 @@ channel `append`) — the same family as `State.unsafeRunTask`.
 ## Known limitations (stub)
 
 - **`sbt-task` is queued on the command loop.** It waits its turn behind any running
-  command or triggered rebuild (returns `[timeout]` only after 30 minutes). Needs at
-  least one sbt channel attached; otherwise it reports no channel.
+  command or triggered rebuild (returns `[timeout]` only after 30 minutes).
+- **stdio launcher.** Tested on Linux; Windows (`cmd /c sbt.bat`, and Unix domain
+  sockets, which Windows 10+ supports) is untested. Server-to-client notifications other than a changed tool list aren't
+  relayed (sbt-mcp sends none). The launcher answers the snapshot's era only for the
+  2026-07-28 and legacy revisions it lists.
 - **`glob-search` / `inspect` fidelity.** Name matching is a case-insensitive
   boundary/`contains` approximation (Metals matches the last FQN segment at a name
   boundary); signatures are rendered via `declaredType.toString`, not pretty Scala
@@ -310,15 +363,35 @@ Under `src/sbt-test/server/`, run with `sbt scripted` or `sbt 'scripted server/<
   upstream auto-compile and broken-upstream fallback, Scala 2 / validation refusals,
   output rendering, a warm-vs-compile performance assertion, and the `check` MCP tool
   over HTTP (incl. concurrent calls) while the command loop is busy.
+- **`stdio-launcher`** — the running server's `server.json` (socket, no URL without
+  `mcpPort`, this JVM's pid), the socket's 0600 mode, no HTTP port bound, one
+  `tools/list` exchange over the socket (also after `reload` re-binds it),
+  `mcpInstallStdio` writing the launcher and snapshot (world-readable) and then finding
+  them up to date, and the out-of-date warning after a stale snapshot and `reload`.
 - **`ci-disable`** — verifies `mcpDisableInCI` defaults to true and, when the scripted
   suite runs under CI or with Heroku's `SOURCE_VERSION`, proves an enabled server did
   not bind its configured port.
 
 Server-starting scripted fixtures set `mcpDisableInCI := false` explicitly so they
-continue to exercise the embedded server on CI runners. `SbtMcpPluginSpec` tests the
+continue to exercise the embedded server on CI runners. Fixtures whose harnesses use
+zio-http-mcp's HTTP client set `mcpPort := Some(<port>)`. `SbtMcpPluginSpec` tests the
 startup decision, including the default CI/Heroku guard and its explicit override.
 `ModuleCheckSpec` unit-tests `check`'s option sanitizing, `-Werror` handling, scope
 parsing, Scala-version gate, changed-source detection, and rendering.
+
+`McpStdioLauncherSpec` unit-tests the installed files, `server.json` and the socket
+path. `McpStdioLauncherIntegrationSpec` (in `latestDependencyTests`, forked) runs the
+real launcher with `java` against a real server runtime on its socket: socket
+permissions, stale and live socket files; the official MCP Java SDK's stdio client
+connecting before the server exists and getting `tools/list_changed`; 2026-07-28
+discover, version errors, subscriptions, concurrent calls and cancellation; a reload
+(the in-flight call reported lost, the next one delivered once to the restarted
+server); and starting sbt (a stand-in `sbt` script) including the failure report when
+sbt starts without sbt-mcp.
+
+```
+./sbt "latestDependencyTests/testOnly com.jamesward.sbtmcp.McpStdioLauncherIntegrationSpec"
+```
 
 The real-client eval `SbtMcpKiroDocsSpec` is intentionally outside `scripted`: it
 connects to production `https://www.javadocs.dev/mcp`, verifies the proxied tools
@@ -339,8 +412,9 @@ call; pass/fail is based on transcript/tool-trace inspection: an sbt-mcp `compil
 Each available/authenticated provider makes two paid calls; unavailable providers'
 model-backed tests are marked ignored.
 
-Neither eval suite executes in CI: `.github/workflows/test.yml` runs only
-`./sbt 'compile; scripted'`, not `test`, `Test/test`, or `testOnly`.
+Neither eval suite executes in CI. `.github/workflows/test.yml` (and the release job)
+run `testFull` (all unit tests), the `latestDependencyTests` specs except `SbtMcpEvalSpec`
+and `SbtMcpKiroDocsSpec`, and `compile; latestDependencyTests/Test/compile; scripted`.
 
 ```
 ./sbt "testOnly com.jamesward.sbtmcp.SbtMcpEvalSpec"

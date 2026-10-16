@@ -13,7 +13,7 @@ ThisBuild / scalaVersion := "3.9.0"
 Global / mcpEnabled     := true
 // This fixture intentionally exercises the server even when scripted runs in CI.
 Global / mcpDisableInCI := false
-Global / mcpPort        := 5097
+Global / mcpPort        := Some(5097)
 Global / mcpHost        := "127.0.0.1"
 Global / mcpDocsUrl     := None
 
