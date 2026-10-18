@@ -1,5 +1,39 @@
 # sbt-mcp
 
+> [!WARNING]
+> **sbt-mcp is deprecated. Use [sbta](https://github.com/jamesward/sbta) instead.**
+>
+> sbta is an sbt launcher (`./sbta` is sbt) whose `./sbta --mcp` is an MCP server for
+> the build, with the same tools: `compile`, `test`, `run`, `check`, the symbol tools,
+> `sbt-task` and the rest. It needs **no plugin**, works with **sbt 1.4+ and 2.x**, and
+> sets up with one command for each agent: `./sbta --mcp --setup kiro|claude|cursor`.
+>
+> What building sbt-mcp taught us, and why sbta replaces it:
+>
+> - **An MCP server inside the build is the wrong place.** It needs a plugin in every
+>   build, `mcpEnabled`/`mcpDisableInCI` settings, and care with `Global` vs `ThisBuild`.
+>   It also restarts on every `reload`, dropping calls in flight, and runs one server
+>   per sbt JVM, which source dependencies can override.
+> - **MCP clients connect before sbt is up.** Bridging that took a committed launcher
+>   (`.sbt-mcp/SbtMcpStdio.java`) with a snapshot of the tool list, which had to be
+>   regenerated on every upgrade. A plain sbt task can't own the stdio pipe: sbt
+>   prints its own output on stdout, and a long-running task blocks the command loop
+>   the tools need.
+> - **sbt already has a server.** Its protocol (`sbt/exec`, `sbt/attach`,
+>   `sbt/cancelRequest`, `sbt/setting`) and BSP on the same user-only socket provide what
+>   the tools need, on sbt 1 and 2: commands with their own console output, compiler
+>   diagnostics, test and main classes, classpaths, and cancellation. Test results come
+>   from the JUnit XML sbt writes by default, dependencies from its update report, and
+>   aggregation from `show`. So a client like `sbtn` can do everything the plugin did.
+> - **One launcher is simpler.** sbta embeds sbt's own launcher, so it replaces `./sbt`
+>   rather than sitting beside it. It starts sbt when needed (shared with your own
+>   commands) and survives `reload`. The `check` and symbol engines from this
+>   plugin now run in sbta, fed from BSP.
+>
+> sbt-mcp gets no further releases. To migrate, remove `addSbtPlugin("com.jamesward" % "sbt-mcp" % …)`,
+> the `mcp*` settings and `.sbt-mcp/`, then follow sbta's
+> [agent setup](https://github.com/jamesward/sbta#agent-setup).
+
 [![javadocs.dev](https://www.javadocs.dev/com.jamesward/sbt-mcp_sbt2_3/badge.svg?1)](https://www.javadocs.dev/com.jamesward/sbt-mcp_sbt2_3/latest)
 
 An **opt-in, off-by-default** [Model Context Protocol](https://modelcontextprotocol.io/)
